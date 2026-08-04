@@ -1,0 +1,39 @@
+{
+  "name": "nodex-backend",
+  "version": "1.0.0",
+  "description": "NodeX blockchain analytics API",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "worker": "tsx src/workers/index.ts",
+    "start:worker": "node dist/workers/index.js",
+    "test": "tsx --test src/lib/alpha-scoring.test.ts src/services/helius.test.ts src/services/dexscreener.test.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": [],
+  "engines": {
+    "node": "22.x"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "@clickhouse/client": "^1.23.1",
+    "@supabase/supabase-js": "^2.111.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "helmet": "^8.3.0",
+    "ioredis": "^6.0.0",
+    "morgan": "^1.11.0",
+    "stripe": "^22.4.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/morgan": "^1.9.10",
+    "@types/node": "^26.1.2",
+    "nodemon": "^3.1.14",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
+  }
+}
