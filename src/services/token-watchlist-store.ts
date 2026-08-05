@@ -8,6 +8,7 @@ export interface WatchlistToken {
   contract: string
   name: string
   symbol: string
+  imageUrl?: string
   chain: string
   price: number
   marketCap: number
@@ -33,6 +34,7 @@ interface TokenWatchlistRow {
 
 interface TokenAnalyticsRow {
   contract: string
+  image_url: string
   price: number
   market_cap: number
   change_pct: number
@@ -74,7 +76,7 @@ async function getTokenAnalytics(
   if (!isClickhouseConfigured()) return null
   try {
     const rows = await queryClickhouse<TokenAnalyticsRow>(
-      `SELECT contract, price, market_cap, change_pct, volume, liquidity, churn, launched_at, age_days
+      `SELECT contract, image_url, price, market_cap, change_pct, volume, liquidity, churn, launched_at, age_days
        FROM token_analytics FINAL
        WHERE chain = {chain:String}
          AND period_days = 7
@@ -92,6 +94,7 @@ function applyAnalytics(token: WatchlistToken, analytics?: TokenAnalyticsRow): W
   if (!analytics) return token
   return {
     ...token,
+    imageUrl: analytics.image_url || undefined,
     price: Number(analytics.price) || 0,
     marketCap: Number(analytics.market_cap) || 0,
     changePct: Number(analytics.change_pct) || 0,
@@ -109,6 +112,7 @@ function applyMockMetrics(token: WatchlistToken): WatchlistToken {
   if (!mock) return token
   return {
     ...token,
+    imageUrl: mock.imageUrl,
     price: mock.price,
     marketCap: mock.marketCap,
     changePct: mock.changePct,
