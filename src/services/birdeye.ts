@@ -81,6 +81,7 @@ async function birdeyeFetch(path: string, chain = 'solana', retries = 1): Promis
         'X-API-KEY': config.birdeye.apiKey,
         'x-chain': chain,
       },
+      signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
     })
 
     if (res.status === 429 && attempt < retries) {

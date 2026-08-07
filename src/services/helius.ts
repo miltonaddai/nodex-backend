@@ -71,7 +71,9 @@ export async function getAddressTransactionsPage(
       type: 'SWAP',
     })
     if (before) params.set('before', before)
-    const res = await fetch(`${config.helius.baseUrl}/addresses/${address}/transactions?${params}`)
+    const res = await fetch(`${config.helius.baseUrl}/addresses/${address}/transactions?${params}`, {
+      signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
+    })
     if (res.ok) return (await res.json()) as HeliusEnhancedTransaction[]
     if (res.status !== 429 || attempt === 2) {
       throw new Error(`Helius API error: ${res.status} ${res.statusText}`)
@@ -189,7 +191,8 @@ export async function getSolanaWalletTokenCount(address: string): Promise<number
   while (hasMore) {
     await throttleHelius()
     const res = await fetch(
-      `https://api.helius.xyz/v1/wallet/${address}/balances?api-key=${config.helius.apiKey}&page=${page}&limit=100`
+      `https://api.helius.xyz/v1/wallet/${address}/balances?api-key=${config.helius.apiKey}&page=${page}&limit=100`,
+      { signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs) }
     )
     if (!res.ok) return page === 1 ? null : count
 
@@ -220,7 +223,8 @@ export async function getSolanaWalletPortfolioUsd(address: string): Promise<numb
   while (hasMore) {
     await throttleHelius()
     const res = await fetch(
-      `https://api.helius.xyz/v1/wallet/${address}/balances?api-key=${config.helius.apiKey}&page=${page}&limit=100`
+      `https://api.helius.xyz/v1/wallet/${address}/balances?api-key=${config.helius.apiKey}&page=${page}&limit=100`,
+      { signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs) }
     )
     if (!res.ok) return page === 1 ? null : total
 
@@ -247,7 +251,9 @@ export async function getSolanaWalletBalance(address: string): Promise<number | 
   if (!config.helius.apiKey) return null
 
   await throttleHelius()
-  const res = await fetch(`${config.helius.baseUrl}/addresses/${address}/balances?api-key=${config.helius.apiKey}`)
+  const res = await fetch(`${config.helius.baseUrl}/addresses/${address}/balances?api-key=${config.helius.apiKey}`, {
+    signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
+  })
   if (!res.ok) return null
 
   const data = (await res.json()) as { nativeBalance?: number }

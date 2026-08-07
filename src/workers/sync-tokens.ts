@@ -2,6 +2,7 @@ import { config } from '../config'
 import { allPeriodConfigs } from '../lib/periods'
 import { discoverQualityTokens, pickTokenPeriodFields, type DiscoveredToken } from '../services/birdeye'
 import { insertClickhouse } from '../services/clickhouse'
+import { cacheDeletePattern } from '../services/redis'
 
 function formatNow(): string {
   return new Date().toISOString().replace('T', ' ').slice(0, 19)
@@ -104,6 +105,8 @@ export async function syncTokensForChain(chain: string): Promise<void> {
         })
       )
     }
+
+    await cacheDeletePattern(`v5:tokens:top:${chain}:*`)
 
     const summary = withListing
       .slice(0, 5)

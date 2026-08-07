@@ -79,6 +79,8 @@ export const config = {
   worker: {
     enabled: process.env.WORKER_ENABLED !== 'false',
     tokenSyncIntervalMinutes: parseInt(process.env.TOKEN_SYNC_INTERVAL_MINUTES || '60', 10),
+    pipelineTimeoutMinutes: parseInt(process.env.WORKER_PIPELINE_TIMEOUT_MINUTES || '110', 10),
+    providerRequestTimeoutMs: parseInt(process.env.PROVIDER_REQUEST_TIMEOUT_MS || '30000', 10),
     walletSyncIntervalMinutes: parseInt(process.env.WALLET_SYNC_INTERVAL_MINUTES || '60', 10),
     syncChains: (process.env.SYNC_CHAINS || 'solana').split(',').map((c) => c.trim()).filter(Boolean),
     tokenFetchLimit: parseInt(process.env.TOKEN_FETCH_LIMIT || '200', 10),

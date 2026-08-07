@@ -10,11 +10,18 @@ let healthTimer: NodeJS.Timeout | null = null
 let running = false
 let healthRunning = false
 
+function elapsedSeconds(startedAt: number): string {
+  return ((Date.now() - startedAt) / 1000).toFixed(1)
+}
+
 async function runHealthRefresh(): Promise<void> {
   if (healthRunning) return
   healthRunning = true
+  const startedAt = Date.now()
+  console.log(`[worker] Market health refresh started at ${new Date(startedAt).toISOString()}`)
   try {
     await refreshAllTokenMarketHealth()
+    console.log(`[worker] Market health refresh completed in ${elapsedSeconds(startedAt)}s`)
   } catch (error) {
     console.error('[worker] Token market health refresh failed:', error)
   } finally {
@@ -28,6 +35,15 @@ async function runPipeline(): Promise<void> {
     return
   }
   running = true
+  const startedAt = Date.now()
+  const timeoutMs = config.worker.pipelineTimeoutMinutes * 60 * 1000
+  const watchdog = setTimeout(() => {
+    console.error(
+      `[worker] Pipeline exceeded ${config.worker.pipelineTimeoutMinutes}m; exiting so the process manager can restart it`
+    )
+    process.exit(1)
+  }, timeoutMs)
+  console.log(`[worker] Alpha intelligence pipeline started at ${new Date(startedAt).toISOString()}`)
   try {
     await syncAllTokens()
     await runHealthRefresh()
@@ -50,10 +66,11 @@ async function runPipeline(): Promise<void> {
     // scoring path has no consumer — re-enable it only once it preserves the churn columns.
     //
     // Trade ingestion, top traders and wallet sync stay: they feed the wallets page.
-    console.log('[worker] Alpha intelligence pipeline completed')
+    console.log(`[worker] Alpha intelligence pipeline completed in ${elapsedSeconds(startedAt)}s`)
   } catch (error) {
     console.error('[worker] Alpha intelligence pipeline failed:', error)
   } finally {
+    clearTimeout(watchdog)
     running = false
   }
 }
@@ -66,13 +83,14 @@ async function main(): Promise<void> {
   console.log('NodeX Solana alpha worker starting...')
   console.log(`Chains: ${config.worker.syncChains.join(', ')}`)
   console.log(`Pipeline interval: ${config.worker.tokenSyncIntervalMinutes}m`)
+  console.log(`Pipeline timeout: ${config.worker.pipelineTimeoutMinutes}m`)
   console.log(`Market health interval: ${config.worker.dexScreenerRefreshIntervalMinutes}m`)
-  await runPipeline()
-  pipelineTimer = setInterval(runPipeline, config.worker.tokenSyncIntervalMinutes * 60 * 1000)
+  pipelineTimer = setInterval(() => void runPipeline(), config.worker.tokenSyncIntervalMinutes * 60 * 1000)
   healthTimer = setInterval(
-    runHealthRefresh,
+    () => void runHealthRefresh(),
     config.worker.dexScreenerRefreshIntervalMinutes * 60 * 1000
   )
+  await runPipeline()
 }
 
 function shutdown(): void {
