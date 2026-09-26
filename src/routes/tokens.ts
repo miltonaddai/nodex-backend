@@ -1,17 +1,17 @@
 import { Router, Request, Response } from 'express'
 import { getMockTopTokens } from '../data/mock'
 import { isValidPeriod, periodToDays, PERIOD_CONFIG } from '../lib/periods'
+import { getSnapshot, snapshotFreshUntil } from '../lib/snapshot-cache'
 import { PaginatedResult, parseNumericFilters, parsePagination, parseSortOrder, pickSortColumn } from '../lib/pagination'
 import { authMiddleware } from '../middleware/auth'
 import { subscriptionMiddleware } from '../middleware/subscription'
 import {
   countClickhouseRows,
-  getNextScheduledUpdate,
+  getPipelineSchedule,
   getSnapshotLastUpdated,
   isClickhouseConfigured,
   queryClickhousePaginated,
 } from '../services/clickhouse'
-import { cacheGet, cacheSet } from '../services/redis'
 import { isDemoMode } from '../services/demo-auth'
 
 const router = Router()
@@ -149,20 +149,19 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
 
   const periodDays = isValidPeriod(period) ? periodToDays(period) : PERIOD_CONFIG['7D'].days
   const filterKey = TOKEN_FILTER_KEYS.map((key) => `${key}:${numericFilters[key] ?? ''}`).join('|')
-  const cacheKey = `v6:tokens:top:${chain}:${period}:${page}:${pageSize}:${sortBy}:${sortOrder}:${filterKey}`
-  const cached = await cacheGet<PaginatedResult<ReturnType<typeof mapTokenRow>> & { changeColumnLabel: string }>(cacheKey)
-  if (cached) return res.json(cached)
+  const cacheKey = `v7:tokens:top:${chain}:${period}:${page}:${pageSize}:${sortBy}:${sortOrder}:${filterKey}`
 
   if (isClickhouseConfigured()) {
     try {
-      const total = await countClickhouseRows(
-        'token_analytics',
-        chain,
-        periodDays,
-        'recent-tokens',
-        numericFilters
-      )
-      if (total > 0 || Object.keys(numericFilters).length > 0) {
+      const result = await getSnapshot(cacheKey, async () => {
+        const total = await countClickhouseRows(
+          'token_analytics',
+          chain,
+          periodDays,
+          'recent-tokens',
+          numericFilters
+        )
+        if (total === 0 && Object.keys(numericFilters).length === 0) return null
         const rows = await queryClickhousePaginated<ClickhouseToken>({
           table: 'token_analytics',
           chain,
@@ -175,22 +174,22 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
           numericFilters,
         })
 
-        const [lastUpdated, nextUpdate] = await Promise.all([
+        const [lastUpdated, schedule] = await Promise.all([
           getSnapshotLastUpdated('token_analytics', chain, periodDays),
-          getNextScheduledUpdate().catch(() => null),
+          getPipelineSchedule().catch(() => null),
         ])
-        const result = {
+        const value = {
           items: rows.map((row, i) => mapTokenRow(row, offset + i + 1)),
           page,
           pageSize,
           total,
           lastUpdated,
-          nextUpdate,
+          nextUpdate: schedule?.nextUpdate ?? null,
           changeColumnLabel: changeColumnLabel(period),
         }
-        await cacheSet(cacheKey, result, 300)
-        return res.json(result)
-      }
+        return { value, freshUntil: snapshotFreshUntil(schedule) }
+      })
+      if (result) return res.json(result)
     } catch (err) {
       console.warn('ClickHouse token query failed, falling back to mock data:', err)
     }

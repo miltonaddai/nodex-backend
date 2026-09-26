@@ -69,29 +69,44 @@ async function withClickhouseRetry<T>(operation: () => Promise<T>): Promise<T> {
 /** Where the worker records when its next pipeline run is due. */
 export const PIPELINE_SCHEDULE_KEY = { worker: 'pipeline', chain: 'all', entityKey: 'schedule' } as const
 
+export interface PipelineSchedule {
+  /** When the next pipeline run is due, as an ISO timestamp. */
+  nextUpdate: string | null
+  /** True while a run is writing new data. */
+  running: boolean
+}
+
 /**
- * When the worker's next pipeline run is due, as an ISO timestamp. The worker runs as a separate
- * service, so the API cannot read its timer directly and reads what the worker recorded instead.
+ * The worker's schedule as it last recorded it. The worker runs as a separate service, so the API
+ * cannot read its timer directly and reads what the worker recorded instead.
  */
-export async function getNextScheduledUpdate(): Promise<string | null> {
+export async function getPipelineSchedule(): Promise<PipelineSchedule> {
   const rows = await queryClickhouse<{ cursor: string }>(
     `SELECT cursor FROM worker_checkpoints FINAL
      WHERE worker = {worker:String} AND chain = {chain:String} AND entity_key = {entityKey:String}
      LIMIT 1`,
     PIPELINE_SCHEDULE_KEY
   )
-  const value = rows[0]?.cursor
-  return value && !Number.isNaN(Date.parse(value)) ? value : null
+  const raw = rows[0]?.cursor
+  if (!raw) return { nextUpdate: null, running: false }
+  try {
+    const parsed = JSON.parse(raw) as { nextRunAt?: string; running?: boolean }
+    const nextUpdate = parsed.nextRunAt && !Number.isNaN(Date.parse(parsed.nextRunAt)) ? parsed.nextRunAt : null
+    return { nextUpdate, running: Boolean(parsed.running) }
+  } catch {
+    // Rows written before the running flag held a bare ISO timestamp.
+    return { nextUpdate: Number.isNaN(Date.parse(raw)) ? null : raw, running: false }
+  }
 }
 
-export async function recordNextScheduledUpdate(nextRunAt: Date): Promise<void> {
+export async function recordPipelineSchedule(nextRunAt: Date, running: boolean): Promise<void> {
   const now = new Date().toISOString().slice(0, 19).replace('T', ' ')
   await insertClickhouse('worker_checkpoints', [
     {
       worker: PIPELINE_SCHEDULE_KEY.worker,
       chain: PIPELINE_SCHEDULE_KEY.chain,
       entity_key: PIPELINE_SCHEDULE_KEY.entityKey,
-      cursor: nextRunAt.toISOString(),
+      cursor: JSON.stringify({ nextRunAt: nextRunAt.toISOString(), running }),
       updated_at: now,
     },
   ])

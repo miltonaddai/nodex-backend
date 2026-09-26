@@ -1,13 +1,14 @@
 import { Router, Request, Response } from 'express'
 import { getMockTopWallets } from '../data/mock'
 import { isValidPeriod, periodToDays } from '../lib/periods'
+import { getSnapshot, snapshotFreshUntil } from '../lib/snapshot-cache'
 import { PaginatedResult, parseNumericFilters, parsePagination, parseSortOrder, pickSortColumn } from '../lib/pagination'
 import { isValidSolanaAddress } from '../lib/validation'
 import { authMiddleware } from '../middleware/auth'
 import { subscriptionMiddleware } from '../middleware/subscription'
 import {
   countClickhouseRows,
-  getNextScheduledUpdate,
+  getPipelineSchedule,
   getSnapshotLastUpdated,
   isClickhouseConfigured,
   queryClickhouse,
@@ -212,20 +213,19 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
 
   const periodDays = isValidPeriod(period) ? periodToDays(period) : 7
   const filterKey = WALLET_FILTER_KEYS.map((key) => `${key}:${numericFilters[key] ?? ''}`).join('|')
-  const cacheKey = `v6:wallets:top:${chain}:${period}:${page}:${pageSize}:${sortBy}:${sortOrder}:${filterKey}`
-  const cached = await cacheGet<PaginatedResult<ReturnType<typeof mapWalletRow>>>(cacheKey)
-  if (cached) return res.json(cached)
+  const cacheKey = `v7:wallets:top:${chain}:${period}:${page}:${pageSize}:${sortBy}:${sortOrder}:${filterKey}`
 
   if (isClickhouseConfigured()) {
     try {
-      const total = await countClickhouseRows(
-        'wallet_analytics',
-        chain,
-        periodDays,
-        'smart-wallets',
-        numericFilters
-      )
-      if (total > 0 || Object.keys(numericFilters).length > 0) {
+      const result = await getSnapshot(cacheKey, async () => {
+        const total = await countClickhouseRows(
+          'wallet_analytics',
+          chain,
+          periodDays,
+          'smart-wallets',
+          numericFilters
+        )
+        if (total === 0 && Object.keys(numericFilters).length === 0) return null
         const rows = await queryClickhousePaginated<ClickhouseWallet>({
           table: 'wallet_analytics',
           chain,
@@ -238,21 +238,21 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
           numericFilters,
         })
 
-        const [lastUpdated, nextUpdate] = await Promise.all([
+        const [lastUpdated, schedule] = await Promise.all([
           getSnapshotLastUpdated('wallet_analytics', chain, periodDays),
-          getNextScheduledUpdate().catch(() => null),
+          getPipelineSchedule().catch(() => null),
         ])
-        const result: PaginatedResult<ReturnType<typeof mapWalletRow>> = {
+        const value: PaginatedResult<ReturnType<typeof mapWalletRow>> = {
           items: rows.map((row, i) => mapWalletRow(row, offset + i + 1)),
           page,
           pageSize,
           total,
           lastUpdated,
-          nextUpdate,
+          nextUpdate: schedule?.nextUpdate ?? null,
         }
-        await cacheSet(cacheKey, result, 300)
-        return res.json(result)
-      }
+        return { value, freshUntil: snapshotFreshUntil(schedule) }
+      })
+      if (result) return res.json(result)
     } catch (err) {
       console.warn('ClickHouse wallet query failed, falling back to mock data:', err)
     }
@@ -295,7 +295,6 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
     total: sorted.length,
     lastUpdated: null,
   }
-  await cacheSet(cacheKey, result, 300)
   res.json(result)
 })
 
