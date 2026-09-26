@@ -16,6 +16,15 @@ function parseAllowedOrigins(): string[] {
 
 const allowedOrigins = parseAllowedOrigins()
 
+const tokenSyncIntervalMinutes = parseInt(process.env.TOKEN_SYNC_INTERVAL_MINUTES || '60', 10)
+// 0 disables the standalone market-health timer; health is still refreshed inside every pipeline
+// run. A timer shorter than ClickHouse Cloud's idle timeout keeps the service awake around the
+// clock, which is what drove the bill with no traffic.
+const dexScreenerRefreshIntervalMinutes = parseInt(process.env.DEXSCREENER_REFRESH_INTERVAL_MINUTES || '0', 10)
+// Health rows must outlive the gap between refreshes, or the tokens list empties between runs.
+const marketHealthCadenceMinutes =
+  dexScreenerRefreshIntervalMinutes > 0 ? dexScreenerRefreshIntervalMinutes : tokenSyncIntervalMinutes
+
 export const config = {
   port: parseInt(process.env.PORT || '3001', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
@@ -78,7 +87,7 @@ export const config = {
 
   worker: {
     enabled: process.env.WORKER_ENABLED !== 'false',
-    tokenSyncIntervalMinutes: parseInt(process.env.TOKEN_SYNC_INTERVAL_MINUTES || '60', 10),
+    tokenSyncIntervalMinutes,
     pipelineTimeoutMinutes: parseInt(process.env.WORKER_PIPELINE_TIMEOUT_MINUTES || '110', 10),
     providerRequestTimeoutMs: parseInt(process.env.PROVIDER_REQUEST_TIMEOUT_MS || '30000', 10),
     walletSyncIntervalMinutes: parseInt(process.env.WALLET_SYNC_INTERVAL_MINUTES || '60', 10),
@@ -110,8 +119,11 @@ export const config = {
     alphaTopTraders24hRefreshHours: parseInt(process.env.ALPHA_TOP_TRADERS_24H_REFRESH_HOURS || '24', 10),
     alphaTopTraders7dRefreshHours: parseInt(process.env.ALPHA_TOP_TRADERS_7D_REFRESH_HOURS || '72', 10),
     alphaTopTraders30dRefreshHours: parseInt(process.env.ALPHA_TOP_TRADERS_30D_REFRESH_HOURS || '168', 10),
-    dexScreenerRefreshIntervalMinutes: parseInt(process.env.DEXSCREENER_REFRESH_INTERVAL_MINUTES || '15', 10),
-    tokenMarketHealthMaxAgeMinutes: parseInt(process.env.TOKEN_MARKET_HEALTH_MAX_AGE_MINUTES || '30', 10),
+    dexScreenerRefreshIntervalMinutes,
+    tokenMarketHealthMaxAgeMinutes: parseInt(
+      process.env.TOKEN_MARKET_HEALTH_MAX_AGE_MINUTES || String(marketHealthCadenceMinutes * 2),
+      10
+    ),
     alphaMinQualifiedBuyers: parseInt(process.env.ALPHA_MIN_QUALIFIED_BUYERS || '2', 10),
     // Alpha v2 — evidence tiering, real-buyer detection and out-of-sample reputation.
     alphaMinTradesForEvidence: parseInt(process.env.ALPHA_MIN_TRADES_FOR_EVIDENCE || '25', 10),

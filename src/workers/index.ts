@@ -84,12 +84,16 @@ async function main(): Promise<void> {
   console.log(`Chains: ${config.worker.syncChains.join(', ')}`)
   console.log(`Pipeline interval: ${config.worker.tokenSyncIntervalMinutes}m`)
   console.log(`Pipeline timeout: ${config.worker.pipelineTimeoutMinutes}m`)
-  console.log(`Market health interval: ${config.worker.dexScreenerRefreshIntervalMinutes}m`)
   pipelineTimer = setInterval(() => void runPipeline(), config.worker.tokenSyncIntervalMinutes * 60 * 1000)
-  healthTimer = setInterval(
-    () => void runHealthRefresh(),
-    config.worker.dexScreenerRefreshIntervalMinutes * 60 * 1000
-  )
+  if (config.worker.dexScreenerRefreshIntervalMinutes > 0) {
+    console.log(`Market health interval: ${config.worker.dexScreenerRefreshIntervalMinutes}m`)
+    healthTimer = setInterval(
+      () => void runHealthRefresh(),
+      config.worker.dexScreenerRefreshIntervalMinutes * 60 * 1000
+    )
+  } else {
+    console.log('Market health interval: with pipeline only')
+  }
   await runPipeline()
 }
 
