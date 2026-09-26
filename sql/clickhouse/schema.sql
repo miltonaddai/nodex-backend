@@ -1,6 +1,10 @@
 -- ClickHouse schema for NodeX blockchain analytics
--- This baseline includes every change through migrations/012-token-images.sql.
+-- Final schema: includes every change through migrations/012-token-images.sql.
 -- Run against your ClickHouse instance (NOT Supabase -- see ../supabase/schema.sql for user data)
+--
+-- Safe to run on a fresh or an existing database, and safe to rerun. Tables are created only if
+-- missing, and the upgrade section at the end adds any column an older table lacks.
+-- Keep semicolons out of comments: some runners split statements on them.
 
 CREATE DATABASE IF NOT EXISTS nodex;
 
@@ -210,3 +214,82 @@ CREATE TABLE IF NOT EXISTS nodex.user_watchlist (
     added_at DateTime DEFAULT now()
 ) ENGINE = MergeTree()
 ORDER BY (user_id, chain, added_at);
+
+-- ---------------------------------------------------------------------------
+-- Upgrade existing tables to the final shape. No-ops on a fresh database.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE nodex.wallet_analytics
+    ADD COLUMN IF NOT EXISTS tokens_held UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS smart_score Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS young_token_trades UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS young_token_wins UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS median_roi_pct Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS avg_entry_delay_minutes Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS realized_profit Float64 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS unrealized_profit Float64 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS concentration_pct Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS risk_flags Array(String) DEFAULT [],
+    ADD COLUMN IF NOT EXISTS reputation_score Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS closed_positions UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS reputation_sample UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS qualified_tokens UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS qualified_wins UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS qualified_profit_usd Float64 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS qualified_win_rate Float32 DEFAULT 0;
+
+ALTER TABLE nodex.token_analytics
+    ADD COLUMN IF NOT EXISTS liquidity Float64 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS change_pct Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS launched_at DateTime DEFAULT toDateTime(0),
+    ADD COLUMN IF NOT EXISTS age_days UInt16 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS alpha_score Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS smart_wallet_buyers UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS smart_money_net_flow Float64 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS buy_acceleration Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS risk_flags Array(String) DEFAULT [],
+    ADD COLUMN IF NOT EXISTS qualified_wallet_buyers UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS fresh_wallet_buyers UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS fresh_wallet_share Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS evidence_tier LowCardinality(String) DEFAULT 'unverified',
+    ADD COLUMN IF NOT EXISTS real_buyers UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS independent_buyers UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS net_inflow_usd Float64 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS retention_rate Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS demand_persistence Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS sniper_share Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS top_buyer_share Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS wash_ratio Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS safety_failed UInt8 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS reputation_weighted_inflow Float64 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS trade_count UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS distinct_traders UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS wealthy_holders UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS median_holder_wealth_usd Float64 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS enriched_holders UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS backfill_complete UInt8 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS mcap_per_buyer Float64 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS churn Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS unique_wallet_24h UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS buy_sell_ratio Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS churn_qualified UInt8 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS image_url String DEFAULT '';
+
+ALTER TABLE nodex.token_launches
+    ADD COLUMN IF NOT EXISTS unique_wallet_24h UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS trade_24h_count UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS buy_24h UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS sell_24h UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS fdv Float64 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS churn Float32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS image_url String DEFAULT '';
+
+ALTER TABLE nodex.wallet_token_trades
+    ADD COLUMN IF NOT EXISTS wash_suspected UInt8 DEFAULT 0;
+
+ALTER TABLE nodex.wallet_token_performance
+    ADD COLUMN IF NOT EXISTS wallet_funded_at DateTime DEFAULT toDateTime(0),
+    ADD COLUMN IF NOT EXISTS wallet_net_worth Float64 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS wallet_sol_balance Float64 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS trader_tags Array(String) DEFAULT [],
+    ADD COLUMN IF NOT EXISTS is_fresh_wallet UInt8 DEFAULT 0;

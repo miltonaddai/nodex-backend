@@ -1,6 +1,9 @@
 -- Supabase (PostgreSQL) schema for NodeX user data
--- This baseline includes every change in migrations/.
+-- Final schema: includes every change in migrations/.
 -- Run this in the Supabase SQL Editor (Dashboard → SQL → New query)
+--
+-- Safe to run on a fresh or an existing project, and safe to rerun: every statement is
+-- create-if-missing, add-if-missing, or drop-and-recreate.
 
 -- ---------------------------------------------------------------------------
 -- Profiles (one row per auth user)
@@ -28,6 +31,11 @@ create table if not exists public.subscriptions (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- Projects created before Stripe support lack these columns.
+alter table public.subscriptions
+  add column if not exists stripe_customer_id text,
+  add column if not exists stripe_subscription_id text;
 
 create unique index if not exists subscriptions_stripe_customer_id_idx
   on public.subscriptions (stripe_customer_id)
@@ -76,6 +84,7 @@ create index if not exists watchlist_tokens_user_chain_idx
 create or replace function public.set_updated_at()
 returns trigger
 language plpgsql
+set search_path = public
 as $$
 begin
   new.updated_at = now();

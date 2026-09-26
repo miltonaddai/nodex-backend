@@ -7,6 +7,7 @@ import { authMiddleware } from '../middleware/auth'
 import { subscriptionMiddleware } from '../middleware/subscription'
 import {
   countClickhouseRows,
+  getNextScheduledUpdate,
   getSnapshotLastUpdated,
   isClickhouseConfigured,
   queryClickhouse,
@@ -211,7 +212,7 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
 
   const periodDays = isValidPeriod(period) ? periodToDays(period) : 7
   const filterKey = WALLET_FILTER_KEYS.map((key) => `${key}:${numericFilters[key] ?? ''}`).join('|')
-  const cacheKey = `v5:wallets:top:${chain}:${period}:${page}:${pageSize}:${sortBy}:${sortOrder}:${filterKey}`
+  const cacheKey = `v6:wallets:top:${chain}:${period}:${page}:${pageSize}:${sortBy}:${sortOrder}:${filterKey}`
   const cached = await cacheGet<PaginatedResult<ReturnType<typeof mapWalletRow>>>(cacheKey)
   if (cached) return res.json(cached)
 
@@ -237,13 +238,17 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
           numericFilters,
         })
 
-        const lastUpdated = await getSnapshotLastUpdated('wallet_analytics', chain, periodDays)
+        const [lastUpdated, nextUpdate] = await Promise.all([
+          getSnapshotLastUpdated('wallet_analytics', chain, periodDays),
+          getNextScheduledUpdate().catch(() => null),
+        ])
         const result: PaginatedResult<ReturnType<typeof mapWalletRow>> = {
           items: rows.map((row, i) => mapWalletRow(row, offset + i + 1)),
           page,
           pageSize,
           total,
           lastUpdated,
+          nextUpdate,
         }
         await cacheSet(cacheKey, result, 300)
         return res.json(result)

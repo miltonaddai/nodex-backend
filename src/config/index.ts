@@ -16,7 +16,7 @@ function parseAllowedOrigins(): string[] {
 
 const allowedOrigins = parseAllowedOrigins()
 
-const tokenSyncIntervalMinutes = parseInt(process.env.TOKEN_SYNC_INTERVAL_MINUTES || '60', 10)
+const tokenSyncIntervalMinutes = parseInt(process.env.TOKEN_SYNC_INTERVAL_MINUTES || '120', 10)
 // 0 disables the standalone market-health timer; health is still refreshed inside every pipeline
 // run. A timer shorter than ClickHouse Cloud's idle timeout keeps the service awake around the
 // clock, which is what drove the bill with no traffic.

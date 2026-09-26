@@ -6,6 +6,7 @@ import { authMiddleware } from '../middleware/auth'
 import { subscriptionMiddleware } from '../middleware/subscription'
 import {
   countClickhouseRows,
+  getNextScheduledUpdate,
   getSnapshotLastUpdated,
   isClickhouseConfigured,
   queryClickhousePaginated,
@@ -148,7 +149,7 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
 
   const periodDays = isValidPeriod(period) ? periodToDays(period) : PERIOD_CONFIG['7D'].days
   const filterKey = TOKEN_FILTER_KEYS.map((key) => `${key}:${numericFilters[key] ?? ''}`).join('|')
-  const cacheKey = `v5:tokens:top:${chain}:${period}:${page}:${pageSize}:${sortBy}:${sortOrder}:${filterKey}`
+  const cacheKey = `v6:tokens:top:${chain}:${period}:${page}:${pageSize}:${sortBy}:${sortOrder}:${filterKey}`
   const cached = await cacheGet<PaginatedResult<ReturnType<typeof mapTokenRow>> & { changeColumnLabel: string }>(cacheKey)
   if (cached) return res.json(cached)
 
@@ -174,13 +175,17 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
           numericFilters,
         })
 
-        const lastUpdated = await getSnapshotLastUpdated('token_analytics', chain, periodDays)
+        const [lastUpdated, nextUpdate] = await Promise.all([
+          getSnapshotLastUpdated('token_analytics', chain, periodDays),
+          getNextScheduledUpdate().catch(() => null),
+        ])
         const result = {
           items: rows.map((row, i) => mapTokenRow(row, offset + i + 1)),
           page,
           pageSize,
           total,
           lastUpdated,
+          nextUpdate,
           changeColumnLabel: changeColumnLabel(period),
         }
         await cacheSet(cacheKey, result, 300)

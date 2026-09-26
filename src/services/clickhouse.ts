@@ -66,6 +66,37 @@ async function withClickhouseRetry<T>(operation: () => Promise<T>): Promise<T> {
   throw new Error('ClickHouse request failed after retries')
 }
 
+/** Where the worker records when its next pipeline run is due. */
+export const PIPELINE_SCHEDULE_KEY = { worker: 'pipeline', chain: 'all', entityKey: 'schedule' } as const
+
+/**
+ * When the worker's next pipeline run is due, as an ISO timestamp. The worker runs as a separate
+ * service, so the API cannot read its timer directly and reads what the worker recorded instead.
+ */
+export async function getNextScheduledUpdate(): Promise<string | null> {
+  const rows = await queryClickhouse<{ cursor: string }>(
+    `SELECT cursor FROM worker_checkpoints FINAL
+     WHERE worker = {worker:String} AND chain = {chain:String} AND entity_key = {entityKey:String}
+     LIMIT 1`,
+    PIPELINE_SCHEDULE_KEY
+  )
+  const value = rows[0]?.cursor
+  return value && !Number.isNaN(Date.parse(value)) ? value : null
+}
+
+export async function recordNextScheduledUpdate(nextRunAt: Date): Promise<void> {
+  const now = new Date().toISOString().slice(0, 19).replace('T', ' ')
+  await insertClickhouse('worker_checkpoints', [
+    {
+      worker: PIPELINE_SCHEDULE_KEY.worker,
+      chain: PIPELINE_SCHEDULE_KEY.chain,
+      entity_key: PIPELINE_SCHEDULE_KEY.entityKey,
+      cursor: nextRunAt.toISOString(),
+      updated_at: now,
+    },
+  ])
+}
+
 export async function getSnapshotLastUpdated(
   table: 'wallet_analytics' | 'token_analytics',
   chain: string,

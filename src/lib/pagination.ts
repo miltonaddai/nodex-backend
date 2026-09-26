@@ -10,6 +10,7 @@ export interface PaginatedResult<T> {
   pageSize: number
   total: number
   lastUpdated: string | null
+  nextUpdate?: string | null
   message?: string
 }
 

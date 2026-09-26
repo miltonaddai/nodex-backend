@@ -1,4 +1,5 @@
 import { config } from '../config'
+import { recordNextScheduledUpdate } from '../services/clickhouse'
 import { refreshAllWalletTokenPerformance, syncAllAlphaTrades } from './sync-alpha'
 import { syncAllTopTraders } from './sync-top-traders'
 import { syncAllTokens } from './sync-tokens'
@@ -29,13 +30,28 @@ async function runHealthRefresh(): Promise<void> {
   }
 }
 
+/**
+ * Records when the next pipeline run is due so the frontend can count down to it. setInterval
+ * fires at a fixed rate, so the next tick is one interval after this one.
+ */
+async function recordNextRun(): Promise<void> {
+  const nextRunAt = new Date(Date.now() + config.worker.tokenSyncIntervalMinutes * 60 * 1000)
+  try {
+    await recordNextScheduledUpdate(nextRunAt)
+  } catch (error) {
+    console.warn('[worker] Could not record next pipeline run:', error)
+  }
+}
+
 async function runPipeline(): Promise<void> {
   if (running) {
     console.warn('[worker] Previous alpha pipeline is still running; skipping overlap')
+    await recordNextRun()
     return
   }
   running = true
   const startedAt = Date.now()
+  await recordNextRun()
   const timeoutMs = config.worker.pipelineTimeoutMinutes * 60 * 1000
   const watchdog = setTimeout(() => {
     console.error(
