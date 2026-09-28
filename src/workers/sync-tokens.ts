@@ -2,7 +2,11 @@ import { config } from '../config'
 import { allPeriodConfigs } from '../lib/periods'
 import { discoverQualityTokens, pickTokenPeriodFields, type DiscoveredToken } from '../services/birdeye'
 import { insertClickhouse } from '../services/clickhouse'
+import { getHolderCounts, isBlockscoutConfigured } from '../services/blockscout'
 import { cacheDeletePattern } from '../services/redis'
+
+/** Chains whose holder counts come from Blockscout because Birdeye has none. */
+const BLOCKSCOUT_HOLDER_CHAINS = new Set(['robinhood'])
 
 function formatNow(): string {
   return new Date().toISOString().replace('T', ' ').slice(0, 19)
@@ -25,6 +29,11 @@ export async function syncTokensForChain(chain: string): Promise<void> {
     console.warn('[sync-tokens] BIRDEYE_API_KEY not set, skipping')
     return
   }
+  const needsBlockscout = BLOCKSCOUT_HOLDER_CHAINS.has(chain)
+  if (needsBlockscout && !isBlockscoutConfigured(chain)) {
+    console.warn(`[sync-tokens] ${chain} needs BLOCKSCOUT_API_KEY for holder counts, skipping`)
+    return
+  }
 
   try {
     const tokens = await discoverQualityTokens(chain, {
@@ -40,6 +49,7 @@ export async function syncTokensForChain(chain: string): Promise<void> {
       minAgeHours: config.worker.discoveryMinAgeHours,
       maxAgeDays: config.worker.discoveryMaxAgeDays,
       pages: config.worker.discoveryPages,
+      holderCounts: needsBlockscout ? (addresses) => getHolderCounts(chain, addresses) : undefined,
     })
 
     if (tokens.length === 0) {

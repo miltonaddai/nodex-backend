@@ -1,5 +1,5 @@
 import { config } from '../config'
-import { getSolanaTokenMarketHealth } from '../services/dexscreener'
+import { getTokenMarketHealth } from '../services/dexscreener'
 import { insertClickhouse, queryClickhouse } from '../services/clickhouse'
 
 interface RecentToken {
@@ -10,8 +10,11 @@ function formatNow(): string {
   return new Date().toISOString().replace('T', ' ').slice(0, 19)
 }
 
+/** Chains with Dexscreener coverage and a discovery step feeding token_launches. */
+const MARKET_HEALTH_CHAINS = new Set(['solana', 'robinhood'])
+
 export async function refreshTokenMarketHealth(chain: string): Promise<void> {
-  if (chain !== 'solana') return
+  if (!MARKET_HEALTH_CHAINS.has(chain)) return
   const tokens = await queryClickhouse<RecentToken>(
     `SELECT contract
      FROM token_launches FINAL
@@ -22,7 +25,7 @@ export async function refreshTokenMarketHealth(chain: string): Promise<void> {
   if (tokens.length === 0) return
 
   const contracts = tokens.map((token) => token.contract)
-  const marketHealth = await getSolanaTokenMarketHealth(contracts)
+  const marketHealth = await getTokenMarketHealth(chain, contracts)
   const checkedAt = formatNow()
   const rows = contracts.map((contract) => {
     const market = marketHealth.get(contract)
@@ -39,7 +42,7 @@ export async function refreshTokenMarketHealth(chain: string): Promise<void> {
       contract,
       chain,
       pair_address: market?.pairAddress ?? '',
-      pair_url: market?.pairUrl ?? `https://dexscreener.com/solana/${contract}`,
+      pair_url: market?.pairUrl ?? `https://dexscreener.com/${chain}/${contract}`,
       pair_count: market?.pairCount ?? 0,
       price: market?.price ?? 0,
       market_cap: marketCap,

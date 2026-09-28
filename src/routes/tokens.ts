@@ -16,6 +16,9 @@ import { isDemoMode } from '../services/demo-auth'
 
 const router = Router()
 
+/** Chains with a discovery step writing token_analytics. */
+const TOKEN_CHAINS = new Set(['solana', 'robinhood'])
+
 const TOKEN_SORT_MAP = {
   churn: 'churn',
   alphaScore: 'alpha_score',
@@ -135,7 +138,7 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
     TOKEN_FILTER_KEYS
   ) as Record<string, number>
 
-  if (chain !== 'solana') {
+  if (!TOKEN_CHAINS.has(chain)) {
     return res.json({
       items: [],
       page,
@@ -143,7 +146,7 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
       total: 0,
       lastUpdated: null,
       changeColumnLabel: changeColumnLabel(period),
-      message: 'Only Solana is supported for live token rankings right now.',
+      message: 'Live token rankings cover Solana and Robinhood Chain.',
     })
   }
 

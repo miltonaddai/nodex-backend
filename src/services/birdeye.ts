@@ -70,6 +70,11 @@ export interface TokenTopTrader {
   solBalance: number
 }
 
+/** Birdeye's x-chain value. Chains it knows by our own name pass through. */
+function birdeyeChain(chain: string): string {
+  return chain === 'solana' || chain === 'robinhood' ? chain : 'ethereum'
+}
+
 async function birdeyeFetch(path: string, chain = 'solana', retries = 1): Promise<unknown | null> {
   if (!config.birdeye.apiKey) return null
 
@@ -120,7 +125,7 @@ export async function getTokenTopTraders(
   })
   const json = (await birdeyeFetch(
     `/defi/v2/tokens/top_traders?${params}`,
-    chain === 'solana' ? 'solana' : 'ethereum'
+    birdeyeChain(chain)
   )) as { data?: { items?: Record<string, unknown>[] } } | null
 
   return (json?.data?.items ?? []).map((row) => {
@@ -218,7 +223,7 @@ export interface RecentTokenOptions {
 
 /** Discover recently listed tokens without falling back to generic market-cap leaders. */
 export async function getRecentlyListedTokens(chain: string, opts: RecentTokenOptions): Promise<TokenData[]> {
-  const chainHeader = chain === 'solana' ? 'solana' : 'ethereum'
+  const chainHeader = birdeyeChain(chain)
   const listedAfter = Math.floor(Date.now() / 1000) - opts.maxAgeDays * 86_400
   const pageSize = Math.min(Math.max(opts.pageSize, 1), 100)
   const result = new Map<string, TokenData>()
@@ -295,11 +300,16 @@ export interface DiscoveryOptions {
   minAgeHours: number
   maxAgeDays: number
   pages: number
+  /**
+   * Holder counts for chains where Birdeye has none (Robinhood Chain). When set, the min_holder
+   * request filter is skipped and holders are fetched for tokens that pass the cheap filters.
+   */
+  holderCounts?: (addresses: string[]) => Promise<Map<string, number>>
 }
 
 async function getTokenImageUrls(addresses: string[], chain: string): Promise<Map<string, string>> {
   const images = new Map<string, string>()
-  const chainHeader = chain === 'solana' ? 'solana' : 'ethereum'
+  const chainHeader = birdeyeChain(chain)
 
   for (let offset = 0; offset < addresses.length; offset += 50) {
     const batch = addresses.slice(offset, offset + 50)
@@ -347,7 +357,7 @@ export async function discoverQualityTokens(
   chain: string,
   opts: DiscoveryOptions
 ): Promise<DiscoveredToken[]> {
-  const chainHeader = chain === 'solana' ? 'solana' : 'ethereum'
+  const chainHeader = birdeyeChain(chain)
   const now = Math.floor(Date.now() / 1000)
   const found = new Map<string, DiscoveredToken>()
 
@@ -362,9 +372,10 @@ export async function discoverQualityTokens(
         min_recent_listing_time: String(now - opts.maxAgeDays * 86_400),
         max_recent_listing_time: String(now - opts.minAgeHours * 3600),
         min_liquidity: String(opts.minLiquidity),
-        min_holder: String(opts.minHolders),
         min_trade_24h_count: String(opts.minTrades24h),
       })
+      // Birdeye has no holder counts on some chains, and filtering on one there returns nothing.
+      if (!opts.holderCounts) params.set('min_holder', String(opts.minHolders))
 
       const json = (await birdeyeFetch(`/defi/v3/token/list?${params}`, chainHeader)) as {
         data?: { items?: Record<string, unknown>[] }
@@ -378,16 +389,25 @@ export async function discoverQualityTokens(
     }
   }
 
-  const qualified = [...found.values()]
-    .filter(
-      (t) =>
-        t.fdv >= opts.minFdv &&
-        t.fdv <= opts.maxFdv &&
-        t.volume24h >= opts.minVolume24h &&
-        t.churn >= opts.minChurn &&
-        t.churn <= opts.maxChurn &&
-        t.buySellRatio <= opts.maxBuySellRatio
-    )
+  let candidates = [...found.values()].filter(
+    (t) =>
+      t.fdv >= opts.minFdv &&
+      t.fdv <= opts.maxFdv &&
+      t.volume24h >= opts.minVolume24h &&
+      t.buySellRatio <= opts.maxBuySellRatio
+  )
+  if (opts.holderCounts) {
+    // Only tokens that survived the cheap filters cost a holder lookup.
+    const holders = await opts.holderCounts(candidates.map((t) => t.address))
+    candidates = candidates
+      .filter((t) => (holders.get(t.address) ?? 0) >= opts.minHolders)
+      .map((t) => {
+        const holder = holders.get(t.address) ?? 0
+        return { ...t, holders: holder, churn: holder > 0 ? t.uniqueWallet24h / holder : 0 }
+      })
+  }
+  const qualified = candidates
+    .filter((t) => t.churn >= opts.minChurn && t.churn <= opts.maxChurn)
     .sort((a, b) => b.churn - a.churn)
 
   const missingImages = qualified.filter((token) => !token.imageUrl).map((token) => token.address)
@@ -409,7 +429,7 @@ export async function getTopTokensFiltered(
   chain: string,
   opts: { limit: number; minLiquidity: number; minVolume: number; minHolders: number }
 ): Promise<TokenData[]> {
-  const chainHeader = chain === 'solana' ? 'solana' : 'ethereum'
+  const chainHeader = birdeyeChain(chain)
   const limit = Math.min(Math.max(opts.limit, 1), 100)
   const params = new URLSearchParams({
     sort_by: 'volume_24h_usd',
@@ -438,7 +458,7 @@ export async function getTopTokensForPeriod(
 ): Promise<TokenData[]> {
   const json = (await birdeyeFetch(
     `/defi/tokenlist?sort_by=${encodeURIComponent(period.tokenSortBy)}&sort_type=desc&offset=0&limit=${limit}`,
-    chain === 'solana' ? 'solana' : 'ethereum'
+    birdeyeChain(chain)
   )) as { data?: { tokens?: Record<string, unknown>[] } } | null
 
   if (!json?.data?.tokens) return []
@@ -452,7 +472,7 @@ export async function getTraderGainersLosers(
 ): Promise<TraderGainerRow[]> {
   const json = (await birdeyeFetch(
     `/trader/gainers-losers?type=${encodeURIComponent(period.birdeyeWalletType)}&sort_by=realized_pnl&sort_type=desc&offset=0&limit=${limit}`,
-    chain === 'solana' ? 'solana' : 'ethereum'
+    birdeyeChain(chain)
   )) as { data?: { items?: Record<string, unknown>[]; traders?: Record<string, unknown>[] } } | null
 
   const items = json?.data?.items ?? json?.data?.traders ?? []
@@ -541,7 +561,7 @@ export async function getWalletNetWorthUsd(wallet: string, minHoldingValue = 100
 export async function getTopTokens(chain: string, limit = 10): Promise<TokenData[]> {
   const json = (await birdeyeFetch(
     `/defi/tokenlist?sort_by=mc&sort_type=desc&offset=0&limit=${limit}`,
-    chain === 'solana' ? 'solana' : 'ethereum'
+    birdeyeChain(chain)
   )) as { data?: { tokens?: Record<string, unknown>[] } } | null
 
   if (!json?.data?.tokens) return []
@@ -549,7 +569,7 @@ export async function getTopTokens(chain: string, limit = 10): Promise<TokenData
 }
 
 export async function getTokenOverview(address: string, chain: string): Promise<TokenData | null> {
-  const json = (await birdeyeFetch(`/defi/token_overview?address=${address}`, chain === 'solana' ? 'solana' : 'ethereum')) as {
+  const json = (await birdeyeFetch(`/defi/token_overview?address=${address}`, birdeyeChain(chain))) as {
     data?: Record<string, unknown>
   } | null
 
@@ -577,7 +597,7 @@ export async function getPriceHistory(
     time_from: String(Math.floor(timeFrom)),
     time_to: String(Math.floor(timeTo)),
   })
-  const json = (await birdeyeFetch(`/defi/history_price?${params}`, chain === 'solana' ? 'solana' : 'ethereum')) as {
+  const json = (await birdeyeFetch(`/defi/history_price?${params}`, birdeyeChain(chain))) as {
     data?: { items?: Array<{ unixTime?: number; value?: number }> }
   } | null
   return (json?.data?.items ?? [])
@@ -594,20 +614,26 @@ export interface LeaderboardTrader {
   trades: number
 }
 
-/** One page of Birdeye's trader profit leaderboard. `type` is a window like 30d. */
+/**
+ * One page of Birdeye's trader profit leaderboard. `type` is a window like 30d. Sorting by total
+ * PnL surfaces paper gains and sorting by realized PnL surfaces accounting artifacts, and which
+ * one holds the real traders differs by chain, so callers read both.
+ */
 export async function getProfitLeaderboardPage(
   type: 'today' | '1W' | '30d' | '90d',
   offset: number,
-  limit = 50
+  limit = 50,
+  chain = 'solana',
+  sortBy: 'PnL' | 'realized_pnl' = 'PnL'
 ): Promise<LeaderboardTrader[]> {
   const params = new URLSearchParams({
     type,
-    sort_by: 'PnL',
+    sort_by: sortBy,
     sort_type: 'desc',
     offset: String(offset),
     limit: String(Math.min(Math.max(limit, 1), 50)),
   })
-  const json = (await birdeyeFetch(`/trader/gainers-losers?${params}`)) as {
+  const json = (await birdeyeFetch(`/trader/gainers-losers?${params}`, chain)) as {
     data?: { items?: Record<string, unknown>[] }
   } | null
   return (json?.data?.items ?? []).map((row) => ({
@@ -648,7 +674,12 @@ function swapSide(raw: unknown): WalletSwapSide {
 }
 
 /** A wallet's swaps since `afterTime` (unix seconds), newest first. */
-export async function getWalletSwapsSince(wallet: string, afterTime: number, maxPages = 2): Promise<WalletSwap[]> {
+export async function getWalletSwapsSince(
+  wallet: string,
+  afterTime: number,
+  maxPages = 2,
+  chain = 'solana'
+): Promise<WalletSwap[]> {
   // Newest first. Stops at the first short page or after maxPages.
   const swaps: WalletSwap[] = []
   for (let page = 0; page < maxPages; page++) {
@@ -659,7 +690,7 @@ export async function getWalletSwapsSince(wallet: string, afterTime: number, max
       tx_type: 'swap',
       after_time: String(Math.floor(afterTime)),
     })
-    const json = (await birdeyeFetch(`/trader/txs/seek_by_time?${params}`)) as {
+    const json = (await birdeyeFetch(`/trader/txs/seek_by_time?${params}`, chain)) as {
       data?: { items?: Record<string, unknown>[]; has_next?: boolean }
     } | null
     for (const row of json?.data?.items ?? []) {

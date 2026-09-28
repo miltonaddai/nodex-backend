@@ -63,6 +63,11 @@ export const config = {
     baseUrl: 'https://public-api.birdeye.so',
   },
 
+  blockscout: {
+    // Keyed Blockscout gateway, used for Robinhood Chain holder counts.
+    apiKey: process.env.BLOCKSCOUT_API_KEY || '',
+  },
+
   alchemy: {
     apiKey: process.env.ALCHEMY_API_KEY || '',
     solanaUrl: process.env.ALCHEMY_SOLANA_URL || '',
@@ -95,7 +100,7 @@ export const config = {
     pipelineTimeoutMinutes: parseInt(process.env.WORKER_PIPELINE_TIMEOUT_MINUTES || '110', 10),
     providerRequestTimeoutMs: parseInt(process.env.PROVIDER_REQUEST_TIMEOUT_MS || '30000', 10),
     walletSyncIntervalMinutes: parseInt(process.env.WALLET_SYNC_INTERVAL_MINUTES || '60', 10),
-    syncChains: (process.env.SYNC_CHAINS || 'solana').split(',').map((c) => c.trim()).filter(Boolean),
+    syncChains: (process.env.SYNC_CHAINS || 'solana,robinhood').split(',').map((c) => c.trim()).filter(Boolean),
     tokenFetchLimit: parseInt(process.env.TOKEN_FETCH_LIMIT || '200', 10),
     tokenMinLiquidity: parseInt(process.env.TOKEN_MIN_LIQUIDITY || '10000', 10),
     tokenMinVolume: parseInt(process.env.TOKEN_MIN_VOLUME || '5000', 10),
@@ -219,9 +224,18 @@ export const config = {
     // only new swaps: about one Birdeye call per wallet that has traded since the last run.
     smartMoneyWallets: parseInt(process.env.SMART_MONEY_WALLETS || '200', 10),
     smartMoneyMinTrades30d: parseInt(process.env.SMART_MONEY_MIN_TRADES_30D || '10', 10),
+    // Above 100 trades a day is a bot. On Robinhood Chain five near-identical wallets at 3,800-4,350
+    // trades a month were all buying the same token.
+    smartMoneyMaxTrades30d: parseInt(process.env.SMART_MONEY_MAX_TRADES_30D || '3000', 10),
+    // Realized profit above this share of 30-day volume marks a wallet dumping tokens it got for
+    // free rather than trading. See DEFAULT_MAX_PROFIT_TO_VOLUME in lib/smart-money.
+    smartMoneyMaxProfitToVolume: parseFloat(process.env.SMART_MONEY_MAX_PROFIT_TO_VOLUME || '0.35'),
     // Only live wallets are tracked: owned by the System Program, holding enough SOL to trade,
     // and used recently. Burner wallets that were drained and closed fail all three.
     smartMoneyMinSolBalance: parseFloat(process.env.SMART_MONEY_MIN_SOL_BALANCE || '0.1'),
+    // Robinhood Chain gas is cheap, but bot groups sat at 0.003-0.010 ETH each, so the floor is
+    // set just above them.
+    smartMoneyMinEthBalance: parseFloat(process.env.SMART_MONEY_MIN_ETH_BALANCE || '0.02'),
     smartMoneyMaxIdleDays: parseInt(process.env.SMART_MONEY_MAX_IDLE_DAYS || '7', 10),
     smartMoneyBuyWindowHours: parseInt(process.env.SMART_MONEY_BUY_WINDOW_HOURS || '72', 10),
     // Caps the backfill for very active wallets (100 swaps per page).

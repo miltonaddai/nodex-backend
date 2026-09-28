@@ -43,11 +43,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-async function fetchBatch(addresses: string[]): Promise<DexPair[]> {
+/** Dexscreener chain slugs match ours: solana, robinhood. */
+async function fetchBatch(addresses: string[], chain = 'solana'): Promise<DexPair[]> {
   const path = addresses.map(encodeURIComponent).join(',')
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const response = await fetch(`${BASE_URL}/tokens/v1/solana/${path}`, {
+      const response = await fetch(`${BASE_URL}/tokens/v1/${encodeURIComponent(chain)}/${path}`, {
         signal: AbortSignal.timeout(15_000),
       })
       if (response.status === 429 && attempt < 2) {
@@ -65,11 +66,15 @@ async function fetchBatch(addresses: string[]): Promise<DexPair[]> {
   return []
 }
 
-export function selectTokenMarketHealth(contract: string, pairs: DexPair[]): TokenMarketHealth | null {
+export function selectTokenMarketHealth(
+  contract: string,
+  pairs: DexPair[],
+  chain = 'solana'
+): TokenMarketHealth | null {
   const contractLower = contract.toLowerCase()
   const matches = pairs.filter(
     (pair) =>
-      pair.chainId === 'solana' &&
+      pair.chainId === chain &&
       pair.baseToken?.address?.toLowerCase() === contractLower
   )
   if (matches.length === 0) return null
@@ -80,7 +85,7 @@ export function selectTokenMarketHealth(contract: string, pairs: DexPair[]): Tok
   return {
     contract,
     pairAddress: primary.pairAddress ?? '',
-    pairUrl: primary.url ?? `https://dexscreener.com/solana/${contract}`,
+    pairUrl: primary.url ?? `https://dexscreener.com/${chain}/${contract}`,
     pairCount: matches.length,
     price: number(primary.priceUsd),
     marketCap: number(primary.marketCap),
@@ -91,16 +96,17 @@ export function selectTokenMarketHealth(contract: string, pairs: DexPair[]): Tok
   }
 }
 
-export async function getSolanaTokenMarketHealth(
+export async function getTokenMarketHealth(
+  chain: string,
   addresses: string[]
 ): Promise<Map<string, TokenMarketHealth>> {
   const unique = [...new Set(addresses.filter(Boolean))]
   const result = new Map<string, TokenMarketHealth>()
   for (let index = 0; index < unique.length; index += MAX_BATCH_SIZE) {
     const batch = unique.slice(index, index + MAX_BATCH_SIZE)
-    const pairs = await fetchBatch(batch)
+    const pairs = await fetchBatch(batch, chain)
     for (const address of batch) {
-      const health = selectTokenMarketHealth(address, pairs)
+      const health = selectTokenMarketHealth(address, pairs, chain)
       if (health) result.set(address, health)
     }
     if (index + MAX_BATCH_SIZE < unique.length) await sleep(250)
@@ -114,15 +120,19 @@ export interface DexTokenInfo {
   imageUrl: string
 }
 
-/** Name, symbol and logo per token, from the pairs Dexscreener lists for it. */
-export async function getSolanaTokenInfo(addresses: string[]): Promise<Map<string, DexTokenInfo>> {
+/**
+ * Name, symbol and logo per token, from the pairs Dexscreener lists for it. Keys are the
+ * addresses as requested: EVM addresses can come back in a different letter case.
+ */
+export async function getTokenInfo(chain: string, addresses: string[]): Promise<Map<string, DexTokenInfo>> {
   const unique = [...new Set(addresses.filter(Boolean))]
+  const requested = new Map(unique.map((address) => [address.toLowerCase(), address]))
   const result = new Map<string, DexTokenInfo>()
   for (let index = 0; index < unique.length; index += MAX_BATCH_SIZE) {
-    const pairs = await fetchBatch(unique.slice(index, index + MAX_BATCH_SIZE))
+    const pairs = await fetchBatch(unique.slice(index, index + MAX_BATCH_SIZE), chain)
     for (const pair of pairs) {
-      const address = pair.baseToken?.address
-      if (!address || pair.chainId !== 'solana') continue
+      const address = requested.get(pair.baseToken?.address?.toLowerCase() ?? '')
+      if (!address || pair.chainId !== chain) continue
       const existing = result.get(address)
       if (existing?.imageUrl) continue
       result.set(address, {
@@ -134,4 +144,8 @@ export async function getSolanaTokenInfo(addresses: string[]): Promise<Map<strin
     if (index + MAX_BATCH_SIZE < unique.length) await sleep(250)
   }
   return result
+}
+
+export function getSolanaTokenMarketHealth(addresses: string[]): Promise<Map<string, TokenMarketHealth>> {
+  return getTokenMarketHealth('solana', addresses)
 }

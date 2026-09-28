@@ -8,6 +8,9 @@ import { getPipelineSchedule, isClickhouseConfigured, queryClickhouse } from '..
 
 const router = Router()
 
+/** Chains the smart money worker covers. */
+const CHAINS = new Set(['solana', 'robinhood'])
+
 const BUY_SORT_MAP = {
   walletCount: 'wallet_count',
   netBuyUsd: 'net_buy_usd',
@@ -125,7 +128,7 @@ router.get('/buys', authMiddleware, subscriptionMiddleware, async (req: Request,
     trackedWallets: 0,
     windowHours: config.worker.smartMoneyBuyWindowHours,
   }
-  if (chain !== 'solana') return res.json({ ...empty, message: 'Smart money tracking covers Solana only.' })
+  if (!CHAINS.has(chain)) return res.json({ ...empty, message: 'Smart money tracking covers Solana and Robinhood Chain.' })
   if (!isClickhouseConfigured()) return res.json(empty)
 
   const cacheKey = `v2:smart-money:buys:${chain}:${page}:${pageSize}:${sortBy}:${sortOrder}`
@@ -174,7 +177,7 @@ router.get('/buys', authMiddleware, subscriptionMiddleware, async (req: Request,
 /** The wallets being tracked: the most profitable of the last 30 days, by realized profit. */
 router.get('/wallets', authMiddleware, subscriptionMiddleware, async (req: Request, res: Response) => {
   const chain = (req.query.chain as string) || 'solana'
-  if (chain !== 'solana' || !isClickhouseConfigured()) return res.json({ items: [], lastUpdated: null })
+  if (!CHAINS.has(chain) || !isClickhouseConfigured()) return res.json({ items: [], lastUpdated: null })
   try {
     const result = await getSnapshot(`v2:smart-money:wallets:${chain}`, async () => {
       const [rows, schedule] = await Promise.all([

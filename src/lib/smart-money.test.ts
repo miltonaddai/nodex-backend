@@ -2,9 +2,12 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   aggregateBuying,
+  classifyBehavior,
+  isLiveEvmWallet,
   isLiveTradingWallet,
   isProfitableTrader,
   selectSmartWallets,
+  summarizeBehavior,
   summarizeWalletFlows,
   SYSTEM_PROGRAM,
   type Swap,
@@ -47,9 +50,9 @@ test('a trader whose profit is taken qualifies', () => {
 test('smart wallets are ranked by realized profit and deduplicated', () => {
   const picked = selectSmartWallets(
     [
-      { address: 'X', pnl: 500, realizedPnl: 500, volume: 1, trades: 20 },
-      { address: 'Y', pnl: 900, realizedPnl: 900, volume: 1, trades: 20 },
-      { address: 'X', pnl: 500, realizedPnl: 500, volume: 1, trades: 20 },
+      { address: 'X', pnl: 500, realizedPnl: 500, volume: 10_000, trades: 20 },
+      { address: 'Y', pnl: 900, realizedPnl: 900, volume: 10_000, trades: 20 },
+      { address: 'X', pnl: 500, realizedPnl: 500, volume: 10_000, trades: 20 },
     ],
     10,
     5
@@ -120,4 +123,70 @@ test('ties on wallet count go to the token bought by more profitable wallets', (
 
   assert.deepEqual(buying.map((t) => t.contract), ['ELITE', 'BIGBAG'])
   assert.equal(buying[0].buyerRealizedPnl, 2_600_000)
+})
+
+test('Robinhood swaps into ETH, WETH or USDG are not buys, whatever the address casing', () => {
+  const weth = '0x0bd7d308f8e1639fab988df18a8011f41eacad73'
+  const flows = summarizeWalletFlows(
+    [
+      {
+        blockTime: 1,
+        volumeUsd: 900,
+        base: { address: weth, symbol: 'WETH', uiChangeAmount: 0.3 },
+        quote: { address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', symbol: 'USDG', uiChangeAmount: -900 },
+      },
+      {
+        blockTime: 2,
+        volumeUsd: 400,
+        base: { address: '0xMEME', symbol: 'MEME', uiChangeAmount: 1000 },
+        quote: { address: '0x0000000000000000000000000000000000000000', symbol: 'ETH', uiChangeAmount: -0.1 },
+      },
+    ],
+    'robinhood'
+  )
+  assert.deepEqual([...flows.keys()], ['0xMEME'])
+})
+
+test('contracts, gasless and idle Robinhood addresses are not live wallets', () => {
+  const now = 1_000_000
+  const opts = { minNative: 0.001, maxIdleDays: 7, now }
+  const eth = (n: number) => BigInt(Math.round(n * 1e18))
+  assert.equal(isLiveEvmWallet({ code: '0x6080604052', balanceWei: eth(5) }, now, opts), false, 'contract')
+  assert.equal(isLiveEvmWallet({ code: '0x', balanceWei: eth(0.0001) }, now, opts), false, 'no gas')
+  assert.equal(isLiveEvmWallet({ code: '0x', balanceWei: eth(1) }, now - 30 * 86_400, opts), false, 'idle')
+  assert.equal(isLiveEvmWallet({ code: '0x', balanceWei: eth(1) }, now - 3600, opts), true)
+  // An EIP-7702 delegated wallet is still a person's wallet.
+  assert.equal(isLiveEvmWallet({ code: '0xef0100abcdef', balanceWei: eth(1) }, now - 3600, opts), true)
+})
+
+test('wallets whose profit is half their volume are dumping free tokens, not trading', () => {
+  // Seen on Robinhood Chain: $300k realized on $600k volume.
+  assert.equal(isProfitableTrader({ address: 'A', pnl: 300_162, realizedPnl: 300_162, volume: 605_357, trades: 1293 }, 10), false)
+  // A strong real trader: $1.19M realized on $8.3M volume.
+  assert.equal(isProfitableTrader({ address: 'B', pnl: 1_182_769, realizedPnl: 1_194_118, volume: 8_297_003, trades: 1816 }, 10), true)
+})
+
+test('recent swaps expose dumping and quote-churn bots', () => {
+  const dumper = summarizeBehavior([buy('GRACE', 2_287, 1), sell('GRACE', 22_924, 2)])
+  assert.equal(classifyBehavior(dumper), 'dumping')
+
+  const churn = summarizeBehavior(
+    Array.from({ length: 10 }, (_, i) => ({
+      blockTime: i,
+      volumeUsd: 1_000,
+      base: { address: USDC, symbol: 'USDC', uiChangeAmount: 1_000 },
+      quote: { address: SOL, symbol: 'SOL', uiChangeAmount: -10 },
+    }))
+  )
+  assert.equal(classifyBehavior(churn), 'quote_churn')
+
+  const trader = summarizeBehavior([buy('MEME', 5_000, 1), sell('MEME', 9_000, 2), buy('NEXT', 2_000, 3)])
+  assert.equal(classifyBehavior(trader), 'trader')
+})
+
+test('wallets trading more than the cap are bots, not people', () => {
+  // Seen on Robinhood Chain: 4,292 trades in 30 days, about 140 a day.
+  const bot = { address: 'B', pnl: 83_712, realizedPnl: 83_712, volume: 1_169_840, trades: 4292 }
+  assert.equal(isProfitableTrader(bot, 10, 0.35, 3000), false)
+  assert.equal(isProfitableTrader({ ...bot, trades: 1200 }, 10, 0.35, 3000), true)
 })
