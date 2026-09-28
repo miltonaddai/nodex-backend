@@ -3,6 +3,10 @@
   buildCommand = "npm ci && npm run build"
 
 [deploy]
-  startCommand = "npm run start:worker"
-  restartPolicyType = "on_failure"
-  restartPolicyMaxRetries = 10
+  # Runs as a Railway cron job: Railway starts the worker every two hours, it does one pipeline
+  # run and exits. A long-lived worker waiting on a timer stopped running in production, because
+  # an idle service with no outbound traffic is put to sleep and nothing wakes it.
+  # Keep TOKEN_SYNC_INTERVAL_MINUTES=120 so the site's "next update" countdown matches.
+  startCommand = "npm run start:worker:once"
+  cronSchedule = "0 */2 * * *"
+  restartPolicyType = "never"

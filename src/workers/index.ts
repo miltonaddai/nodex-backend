@@ -50,12 +50,13 @@ function advanceNextRun(): void {
   nextRunAt = new Date(Date.now() + config.worker.tokenSyncIntervalMinutes * 60 * 1000)
 }
 
-async function runPipeline(): Promise<void> {
+/** Runs every pipeline step once. Resolves false if the run failed. */
+async function runPipeline(): Promise<boolean> {
   if (running) {
     console.warn('[worker] Previous alpha pipeline is still running; skipping overlap')
     advanceNextRun()
     await recordSchedule(true)
-    return
+    return true
   }
   running = true
   const startedAt = Date.now()
@@ -97,8 +98,10 @@ async function runPipeline(): Promise<void> {
     //
     // Trade ingestion, top traders and wallet sync stay: they feed the wallets page.
     console.log(`[worker] Alpha intelligence pipeline completed in ${elapsedSeconds(startedAt)}s`)
+    return true
   } catch (error) {
     console.error('[worker] Alpha intelligence pipeline failed:', error)
+    return false
   } finally {
     clearTimeout(watchdog)
     running = false
@@ -113,6 +116,17 @@ async function main(): Promise<void> {
   }
   console.log('NodeX Solana alpha worker starting...')
   console.log(`Chains: ${config.worker.syncChains.join(', ')}`)
+
+  // Once mode is for a scheduler (a Railway cron job) that starts the worker on each run. A
+  // long-lived process waiting on setInterval is fragile on hosts that sleep idle services:
+  // the worker makes no network calls between runs, gets put to sleep, and the timer never fires.
+  if (process.argv.includes('--once') || process.env.WORKER_RUN_ONCE === 'true') {
+    console.log('Mode: single run')
+    const ok = await runPipeline()
+    // Redis and ClickHouse keep-alive sockets would hold the process open, so exit explicitly.
+    process.exit(ok ? 0 : 1)
+  }
+
   console.log(`Pipeline interval: ${config.worker.tokenSyncIntervalMinutes}m`)
   console.log(`Pipeline timeout: ${config.worker.pipelineTimeoutMinutes}m`)
   pipelineTimer = setInterval(() => void runPipeline(), config.worker.tokenSyncIntervalMinutes * 60 * 1000)
