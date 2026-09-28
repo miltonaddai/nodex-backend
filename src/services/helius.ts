@@ -26,6 +26,7 @@ export interface HeliusNativeTransfer {
 
 export interface HeliusEnhancedTransaction {
   signature?: string
+  slot?: number
   timestamp?: number
   type?: string
   feePayer?: string
@@ -280,4 +281,156 @@ export async function enrichSolanaWalletBalanceUsd(address: string, solUsdPrice:
   const solBalance = await getSolanaWalletBalance(address)
   if (solBalance === null) return 0
   return Math.round(solBalance * solUsdPrice)
+}
+
+// --- Launch-insider analysis ---------------------------------------------------------------
+
+async function heliusRpc<T>(method: string, params: unknown): Promise<T> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await throttleHelius()
+    const res = await fetch(`${config.helius.rpcUrl}/?api-key=${config.helius.apiKey}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+      signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
+    })
+    if (res.status === 429 && attempt < 3) {
+      await new Promise((resolve) => setTimeout(resolve, 2_000 * 2 ** attempt))
+      continue
+    }
+    if (!res.ok) throw new Error(`Helius RPC ${method} error: ${res.status}`)
+    const json = (await res.json()) as { result?: T; error?: { message?: string } }
+    if (json.error) throw new Error(`Helius RPC ${method} error: ${json.error.message ?? 'unknown'}`)
+    return json.result as T
+  }
+  throw new Error(`Helius RPC ${method} rate limited`)
+}
+
+export interface SignatureInfo {
+  signature: string
+  slot: number
+  blockTime: number | null
+  err: unknown
+}
+
+/** An address's transactions oldest first. Only Helius offers ascending order. */
+export async function getSignaturesOldestFirst(address: string, limit: number): Promise<SignatureInfo[]> {
+  const result = await heliusRpc<{ data?: SignatureInfo[] }>('getTransactionsForAddress', [
+    address,
+    { transactionDetails: 'signatures', sortOrder: 'asc', limit: Math.min(Math.max(limit, 1), 1000) },
+  ])
+  return result.data ?? []
+}
+
+/** Parses signatures into enhanced transactions, 100 per request. Order is not preserved. */
+export async function parseTransactions<T = HeliusEnhancedTransaction>(signatures: string[]): Promise<T[]> {
+  const parsed: T[] = []
+  for (let index = 0; index < signatures.length; index += 100) {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await throttleHelius()
+      const res = await fetch(`${config.helius.baseUrl}/transactions?api-key=${config.helius.apiKey}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ transactions: signatures.slice(index, index + 100) }),
+        signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
+      })
+      if (res.status === 429 && attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, 2_000 * 2 ** attempt))
+        continue
+      }
+      if (!res.ok) throw new Error(`Helius parse error: ${res.status}`)
+      parsed.push(...((await res.json()) as T[]))
+      break
+    }
+  }
+  return parsed
+}
+
+/** The wallet that sent this wallet its first meaningful SOL, or null if none is found early on. */
+export async function getFundingSource(wallet: string): Promise<string | null> {
+  const signatures = (await getSignaturesOldestFirst(wallet, 15)).filter((s) => !s.err).map((s) => s.signature)
+  if (signatures.length === 0) return null
+  const txs = (await parseTransactions(signatures)).sort((a, b) => Number(a.timestamp ?? 0) - Number(b.timestamp ?? 0))
+  for (const tx of txs) {
+    const inflow = (tx.nativeTransfers ?? []).find(
+      (transfer) =>
+        transfer.toUserAccount === wallet &&
+        transfer.fromUserAccount !== wallet &&
+        Number(transfer.amount ?? 0) >= 1e7
+    )
+    if (inflow?.fromUserAccount) return inflow.fromUserAccount
+  }
+  return null
+}
+
+/**
+ * Exchange hot wallets and wallet services fund thousands of unrelated users, so sharing one
+ * says nothing. They show up as very high transaction rates or very large balances.
+ */
+export async function isHighThroughputWallet(address: string): Promise<boolean> {
+  const signatures = await heliusRpc<Array<{ blockTime?: number | null }>>('getSignaturesForAddress', [address, { limit: 100 }])
+  if (signatures.length >= 100) {
+    const newest = signatures[0]?.blockTime ?? 0
+    const oldest = signatures[signatures.length - 1]?.blockTime ?? 0
+    const hours = Math.max((newest - oldest) / 3600, 1 / 60)
+    if (signatures.length / hours > 60) return true
+  }
+  const balance = await heliusRpc<{ value?: number }>('getBalance', [address])
+  return Number(balance.value ?? 0) / 1e9 > 20_000
+}
+
+export async function getTokenSupply(mint: string): Promise<{ supply: number; decimals: number }> {
+  const result = await heliusRpc<{ value?: { uiAmount?: number; decimals?: number } }>('getTokenSupply', [mint])
+  return { supply: Number(result.value?.uiAmount ?? 0), decimals: Number(result.value?.decimals ?? 0) }
+}
+
+/** Current balance of every holder, from Helius DAS. Capped at `maxPages` × 1000 accounts. */
+export async function getTokenHolderBalances(mint: string, decimals: number, maxPages = 25): Promise<Map<string, number>> {
+  const balances = new Map<string, number>()
+  for (let page = 1; page <= maxPages; page++) {
+    const result = await heliusRpc<{ token_accounts?: Array<{ owner?: string; amount?: number }> }>('getTokenAccounts', {
+      mint,
+      page,
+      limit: 1000,
+    })
+    const accounts = result.token_accounts ?? []
+    for (const account of accounts) {
+      if (!account.owner) continue
+      const amount = Number(account.amount ?? 0) / 10 ** decimals
+      balances.set(account.owner, (balances.get(account.owner) ?? 0) + amount)
+    }
+    if (accounts.length < 1000) break
+  }
+  return balances
+}
+
+export interface AccountSummary {
+  /** Program that owns the account. Ordinary wallets are owned by the System Program. */
+  owner: string
+  lamports: number
+}
+
+/** Owner and balance for many accounts. Missing entries are accounts that do not exist. */
+export async function getAccountSummaries(addresses: string[]): Promise<Map<string, AccountSummary>> {
+  const result = new Map<string, AccountSummary>()
+  for (let index = 0; index < addresses.length; index += 100) {
+    const batch = addresses.slice(index, index + 100)
+    const response = await heliusRpc<{ value?: Array<{ owner?: string; lamports?: number } | null> }>(
+      'getMultipleAccounts',
+      [batch, { encoding: 'base64', dataSlice: { offset: 0, length: 0 } }]
+    )
+    ;(response.value ?? []).forEach((account, i) => {
+      if (account?.owner) result.set(batch[i], { owner: account.owner, lamports: Number(account.lamports ?? 0) })
+    })
+  }
+  return result
+}
+
+/** Unix time of an address's most recent transaction, or null if it has none. */
+export async function getLastActivityTime(address: string): Promise<number | null> {
+  const signatures = await heliusRpc<Array<{ blockTime?: number | null }>>('getSignaturesForAddress', [
+    address,
+    { limit: 1 },
+  ])
+  return signatures[0]?.blockTime ?? null
 }

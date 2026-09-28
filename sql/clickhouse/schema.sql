@@ -1,5 +1,5 @@
 -- ClickHouse schema for NodeX blockchain analytics
--- Final schema: includes every change through migrations/012-token-images.sql.
+-- Final schema: includes every change through migrations/015-smart-money-swaps.sql.
 -- Run against your ClickHouse instance (NOT Supabase -- see ../supabase/schema.sql for user data)
 --
 -- Safe to run on a fresh or an existing database, and safe to rerun. Tables are created only if
@@ -205,6 +205,110 @@ CREATE TABLE IF NOT EXISTS nodex.wallet_wealth (
 ) ENGINE = ReplacingMergeTree(checked_at)
 ORDER BY (chain, wallet_address);
 
+-- Launch-insider analysis for the Insider Plays page. See migrations/013.
+CREATE TABLE IF NOT EXISTS nodex.token_insider_analysis (
+    contract String,
+    chain LowCardinality(String),
+    name String,
+    symbol String,
+    image_url String DEFAULT '',
+    launched_at DateTime,
+    analyzed_at DateTime,
+    -- Launch analysis. Computed once, since the launch window never changes.
+    launch_buyers UInt32 DEFAULT 0,
+    launch_supply_pct Float32 DEFAULT 0,
+    creation_block_supply_pct Float32 DEFAULT 0,
+    linked_wallets UInt32 DEFAULT 0,
+    linked_supply_pct Float32 DEFAULT 0,
+    clusters UInt32 DEFAULT 0,
+    largest_cluster_supply_pct Float32 DEFAULT 0,
+    co_signed_links UInt32 DEFAULT 0,
+    fee_paid_links UInt32 DEFAULT 0,
+    split_transfers UInt32 DEFAULT 0,
+    shared_funder_links UInt32 DEFAULT 0,
+    insider_wallets Array(String) DEFAULT [],
+    insider_acquired_pct Float32 DEFAULT 0,
+    launch_score Float32 DEFAULT 0,
+    evidence Array(String) DEFAULT [],
+    -- Refreshed every run.
+    insider_holding_pct Float32 DEFAULT 0,
+    insider_status LowCardinality(String) DEFAULT 'unknown',
+    price Float64 DEFAULT 0,
+    market_cap Float64 DEFAULT 0,
+    liquidity Float64 DEFAULT 0,
+    volume_24h Float64 DEFAULT 0,
+    price_change_24h Float32 DEFAULT 0,
+    holders UInt32 DEFAULT 0,
+    launch_high_mc Float64 DEFAULT 0,
+    post_launch_low_mc Float64 DEFAULT 0,
+    ath_mc Float64 DEFAULT 0,
+    price_pattern LowCardinality(String) DEFAULT 'unknown',
+    insider_score Float32 DEFAULT 0,
+    updated_at DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (chain, contract);
+
+-- Smart money wallets and what they are buying. See migrations/014.
+CREATE TABLE IF NOT EXISTS nodex.smart_money_wallets (
+    wallet String,
+    chain LowCardinality(String),
+    rank UInt16,
+    pnl_30d Float64,
+    realized_pnl_30d Float64,
+    volume_30d Float64,
+    trades_30d UInt32,
+    updated_at DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (chain, wallet);
+
+-- One row per token per pipeline run. Readers use the latest snapshot_at.
+CREATE TABLE IF NOT EXISTS nodex.smart_money_buys (
+    snapshot_at DateTime,
+    chain LowCardinality(String),
+    contract String,
+    symbol String,
+    name String,
+    image_url String DEFAULT '',
+    wallet_count UInt16,
+    buy_usd Float64,
+    sell_usd Float64,
+    net_buy_usd Float64,
+    buy_count UInt32,
+    wallets Array(String),
+    wallet_net_buy_usd Array(Float64),
+    wallet_last_buy_at Array(DateTime),
+    first_buy_at DateTime,
+    last_buy_at DateTime,
+    price Float64 DEFAULT 0,
+    market_cap Float64 DEFAULT 0,
+    liquidity Float64 DEFAULT 0,
+    volume_24h Float64 DEFAULT 0,
+    price_change_24h Float32 DEFAULT 0,
+    buyer_realized_pnl_30d Float64 DEFAULT 0
+) ENGINE = MergeTree
+ORDER BY (chain, snapshot_at, contract)
+TTL snapshot_at + INTERVAL 7 DAY DELETE;
+
+-- Stored swaps for tracked smart money wallets. See migrations/015.
+CREATE TABLE IF NOT EXISTS nodex.smart_money_swaps (
+    chain LowCardinality(String),
+    wallet String,
+    tx_hash String,
+    ins_index UInt16 DEFAULT 0,
+    inner_ins_index UInt16 DEFAULT 0,
+    block_time DateTime,
+    volume_usd Float64,
+    base_address String,
+    base_symbol String,
+    base_change Float64,
+    quote_address String,
+    quote_symbol String,
+    quote_change Float64,
+    fetched_at DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(fetched_at)
+ORDER BY (chain, wallet, tx_hash, ins_index, inner_ins_index)
+TTL block_time + INTERVAL 4 DAY DELETE;
+
 -- User watchlist (synced from Supabase or written directly)
 CREATE TABLE IF NOT EXISTS nodex.user_watchlist (
     user_id String,
@@ -293,3 +397,6 @@ ALTER TABLE nodex.wallet_token_performance
     ADD COLUMN IF NOT EXISTS wallet_sol_balance Float64 DEFAULT 0,
     ADD COLUMN IF NOT EXISTS trader_tags Array(String) DEFAULT [],
     ADD COLUMN IF NOT EXISTS is_fresh_wallet UInt8 DEFAULT 0;
+
+ALTER TABLE nodex.smart_money_buys
+    ADD COLUMN IF NOT EXISTS buyer_realized_pnl_30d Float64 DEFAULT 0;

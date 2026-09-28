@@ -3,6 +3,8 @@ const MAX_BATCH_SIZE = 30
 
 interface DexToken {
   address?: string
+  name?: string
+  symbol?: string
 }
 
 export interface DexPair {
@@ -16,6 +18,7 @@ export interface DexPair {
   liquidity?: { usd?: number }
   volume?: { h24?: number }
   priceChange?: { h24?: number }
+  info?: { imageUrl?: string }
 }
 
 export interface TokenMarketHealth {
@@ -99,6 +102,34 @@ export async function getSolanaTokenMarketHealth(
     for (const address of batch) {
       const health = selectTokenMarketHealth(address, pairs)
       if (health) result.set(address, health)
+    }
+    if (index + MAX_BATCH_SIZE < unique.length) await sleep(250)
+  }
+  return result
+}
+
+export interface DexTokenInfo {
+  name: string
+  symbol: string
+  imageUrl: string
+}
+
+/** Name, symbol and logo per token, from the pairs Dexscreener lists for it. */
+export async function getSolanaTokenInfo(addresses: string[]): Promise<Map<string, DexTokenInfo>> {
+  const unique = [...new Set(addresses.filter(Boolean))]
+  const result = new Map<string, DexTokenInfo>()
+  for (let index = 0; index < unique.length; index += MAX_BATCH_SIZE) {
+    const pairs = await fetchBatch(unique.slice(index, index + MAX_BATCH_SIZE))
+    for (const pair of pairs) {
+      const address = pair.baseToken?.address
+      if (!address || pair.chainId !== 'solana') continue
+      const existing = result.get(address)
+      if (existing?.imageUrl) continue
+      result.set(address, {
+        name: pair.baseToken?.name || existing?.name || '',
+        symbol: pair.baseToken?.symbol || existing?.symbol || '',
+        imageUrl: pair.info?.imageUrl || '',
+      })
     }
     if (index + MAX_BATCH_SIZE < unique.length) await sleep(250)
   }

@@ -556,3 +556,124 @@ export async function getTokenOverview(address: string, chain: string): Promise<
   if (!json?.data) return null
   return mapTokenRow(json.data)
 }
+
+export interface PricePoint {
+  unixTime: number
+  value: number
+}
+
+/** Price history for a token between two unix times. `interval` is a Birdeye type like 15m or 1H. */
+export async function getPriceHistory(
+  address: string,
+  chain: string,
+  interval: '15m' | '1H' | '4H',
+  timeFrom: number,
+  timeTo: number
+): Promise<PricePoint[]> {
+  const params = new URLSearchParams({
+    address,
+    address_type: 'token',
+    type: interval,
+    time_from: String(Math.floor(timeFrom)),
+    time_to: String(Math.floor(timeTo)),
+  })
+  const json = (await birdeyeFetch(`/defi/history_price?${params}`, chain === 'solana' ? 'solana' : 'ethereum')) as {
+    data?: { items?: Array<{ unixTime?: number; value?: number }> }
+  } | null
+  return (json?.data?.items ?? [])
+    .map((item) => ({ unixTime: Number(item.unixTime ?? 0), value: Number(item.value ?? 0) }))
+    .filter((point) => point.unixTime > 0 && point.value > 0)
+}
+
+export interface LeaderboardTrader {
+  address: string
+  pnl: number
+  realizedPnl: number
+  unrealizedPnl: number
+  volume: number
+  trades: number
+}
+
+/** One page of Birdeye's trader profit leaderboard. `type` is a window like 30d. */
+export async function getProfitLeaderboardPage(
+  type: 'today' | '1W' | '30d' | '90d',
+  offset: number,
+  limit = 50
+): Promise<LeaderboardTrader[]> {
+  const params = new URLSearchParams({
+    type,
+    sort_by: 'PnL',
+    sort_type: 'desc',
+    offset: String(offset),
+    limit: String(Math.min(Math.max(limit, 1), 50)),
+  })
+  const json = (await birdeyeFetch(`/trader/gainers-losers?${params}`)) as {
+    data?: { items?: Record<string, unknown>[] }
+  } | null
+  return (json?.data?.items ?? []).map((row) => ({
+    address: str(row.address),
+    pnl: num(row.pnl),
+    realizedPnl: num(row.realized_pnl),
+    unrealizedPnl: num(row.unrealized_pnl),
+    volume: num(row.volume),
+    trades: num(row.trade_count),
+  }))
+}
+
+export interface WalletSwapSide {
+  address: string
+  symbol: string
+  /** Signed change for the wallet: positive means it received the token. */
+  uiChangeAmount: number
+}
+
+export interface WalletSwap {
+  txHash: string
+  /** Instruction position, so several swaps in one transaction stay distinct. */
+  insIndex: number
+  innerInsIndex: number
+  blockTime: number
+  volumeUsd: number
+  base: WalletSwapSide
+  quote: WalletSwapSide
+}
+
+function swapSide(raw: unknown): WalletSwapSide {
+  const side = (raw ?? {}) as Record<string, unknown>
+  return {
+    address: str(side.address),
+    symbol: str(side.symbol),
+    uiChangeAmount: num(side.ui_change_amount),
+  }
+}
+
+/** A wallet's swaps since `afterTime` (unix seconds), newest first. */
+export async function getWalletSwapsSince(wallet: string, afterTime: number, maxPages = 2): Promise<WalletSwap[]> {
+  // Newest first. Stops at the first short page or after maxPages.
+  const swaps: WalletSwap[] = []
+  for (let page = 0; page < maxPages; page++) {
+    const params = new URLSearchParams({
+      address: wallet,
+      offset: String(page * 100),
+      limit: '100',
+      tx_type: 'swap',
+      after_time: String(Math.floor(afterTime)),
+    })
+    const json = (await birdeyeFetch(`/trader/txs/seek_by_time?${params}`)) as {
+      data?: { items?: Record<string, unknown>[]; has_next?: boolean }
+    } | null
+    for (const row of json?.data?.items ?? []) {
+      swaps.push({
+        txHash: str(row.tx_hash),
+        insIndex: num(row.ins_index),
+        innerInsIndex: num(row.inner_ins_index),
+        blockTime: num(row.block_unix_time),
+        volumeUsd: num(row.volume_usd),
+        base: swapSide(row.base),
+        quote: swapSide(row.quote),
+      })
+    }
+    if (!json?.data?.has_next) break
+  }
+  return swaps
+}

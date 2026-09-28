@@ -1,9 +1,11 @@
+import { config } from '../config'
+
 let lastBirdeyeCall = 0
 let lastHeliusCall = 0
 let birdeyeGate: Promise<void> = Promise.resolve()
 let heliusGate: Promise<void> = Promise.resolve()
 
-export async function throttleBirdeye(minIntervalMs = 4000): Promise<void> {
+export async function throttleBirdeye(minIntervalMs = config.birdeye.minIntervalMs): Promise<void> {
   let release!: () => void
   const previous = birdeyeGate
   birdeyeGate = new Promise<void>((resolve) => {

@@ -106,7 +106,8 @@ export async function syncTokensForChain(chain: string): Promise<void> {
       )
     }
 
-    await cacheDeletePattern(`v5:tokens:top:${chain}:*`)
+    // Any cache version: the prefix changes whenever the response shape does.
+    await cacheDeletePattern(`*:tokens:top:${chain}:*`)
 
     const summary = withListing
       .slice(0, 5)

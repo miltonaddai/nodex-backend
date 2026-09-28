@@ -52,10 +52,14 @@ export const config = {
   helius: {
     apiKey: process.env.HELIUS_API_KEY || '',
     baseUrl: 'https://api.helius.xyz/v0',
+    rpcUrl: 'https://mainnet.helius-rpc.com',
   },
 
   birdeye: {
     apiKey: process.env.BIRDEYE_API_KEY || '',
+    // Gap between Birdeye calls. The Lite plan allows 15 requests per second, so 100ms (10 per
+    // second) leaves headroom. The free plan needs about 1000.
+    minIntervalMs: parseInt(process.env.BIRDEYE_MIN_INTERVAL_MS || '100', 10),
     baseUrl: 'https://public-api.birdeye.so',
   },
 
@@ -185,6 +189,48 @@ export const config = {
     discoveryMinAgeHours: parseInt(process.env.DISCOVERY_MIN_AGE_HOURS || '1', 10),
     discoveryMaxAgeDays: parseInt(process.env.DISCOVERY_MAX_AGE_DAYS || '14', 10),
     discoveryPages: parseInt(process.env.DISCOVERY_PAGES || '4', 10),
+
+    // --- Insider plays: launch-bundle detection, independent of the churn screen ---
+    // The churn screen rejects exactly these tokens (bundled launches sit in the 0.5-1.2 farm
+    // band), so insider detection runs on its own candidate list of fresh listings.
+    insiderScanMaxAgeDays: parseInt(process.env.INSIDER_SCAN_MAX_AGE_DAYS || '3', 10),
+    // Wait until the launch window has fully settled before analyzing it.
+    insiderScanMinAgeMinutes: parseInt(process.env.INSIDER_SCAN_MIN_AGE_MINUTES || '30', 10),
+    insiderScanMinLiquidity: parseFloat(process.env.INSIDER_SCAN_MIN_LIQUIDITY || '20000'),
+    insiderScanMinVolume24h: parseFloat(process.env.INSIDER_SCAN_MIN_VOLUME_24H || '50000'),
+    insiderScanMinHolders: parseInt(process.env.INSIDER_SCAN_MIN_HOLDERS || '200', 10),
+    insiderScanCandidates: parseInt(process.env.INSIDER_SCAN_CANDIDATES || '50', 10),
+    // Launch analysis costs roughly 60-80 Helius calls per token, so new tokens are capped per run.
+    insiderMaxNewPerRun: parseInt(process.env.INSIDER_MAX_NEW_PER_RUN || '5', 10),
+    // Seconds after the first transaction that count as the launch.
+    insiderLaunchWindowSeconds: parseInt(process.env.INSIDER_LAUNCH_WINDOW_SECONDS || '120', 10),
+    insiderMaxLaunchTxs: parseInt(process.env.INSIDER_MAX_LAUNCH_TXS || '500', 10),
+    // Launch buyers whose funding source is traced. Each costs two Helius calls.
+    insiderFunderLookups: parseInt(process.env.INSIDER_FUNDER_LOOKUPS || '30', 10),
+    // How long an analyzed token keeps being refreshed on the insider page.
+    insiderTrackDays: parseInt(process.env.INSIDER_TRACK_DAYS || '14', 10),
+    insiderMaxTracked: parseInt(process.env.INSIDER_MAX_TRACKED || '40', 10),
+
+    // --- Smart money: what the most profitable wallets are buying ---
+    // Leaderboard wallets scanned daily (50 per Birdeye call) to find traders with real profit.
+    smartMoneyLeaderboardDepth: parseInt(process.env.SMART_MONEY_LEADERBOARD_DEPTH || '2000', 10),
+    smartMoneyLeaderboardRefreshHours: parseInt(process.env.SMART_MONEY_LEADERBOARD_REFRESH_HOURS || '24', 10),
+    // Wallets tracked each run. Swaps are stored, so after a one-time backfill each run fetches
+    // only new swaps: about one Birdeye call per wallet that has traded since the last run.
+    smartMoneyWallets: parseInt(process.env.SMART_MONEY_WALLETS || '200', 10),
+    smartMoneyMinTrades30d: parseInt(process.env.SMART_MONEY_MIN_TRADES_30D || '10', 10),
+    // Only live wallets are tracked: owned by the System Program, holding enough SOL to trade,
+    // and used recently. Burner wallets that were drained and closed fail all three.
+    smartMoneyMinSolBalance: parseFloat(process.env.SMART_MONEY_MIN_SOL_BALANCE || '0.1'),
+    smartMoneyMaxIdleDays: parseInt(process.env.SMART_MONEY_MAX_IDLE_DAYS || '7', 10),
+    smartMoneyBuyWindowHours: parseInt(process.env.SMART_MONEY_BUY_WINDOW_HOURS || '72', 10),
+    // Caps the backfill for very active wallets (100 swaps per page).
+    smartMoneyMaxSwapPages: parseInt(process.env.SMART_MONEY_MAX_SWAP_PAGES || '20', 10),
+    // A wallet counts as buying a token only when it is a net buyer of at least this much.
+    smartMoneyMinNetBuyUsd: parseFloat(process.env.SMART_MONEY_MIN_NET_BUY_USD || '250'),
+    // Tokens below this liquidity are dropped: they are dead launches or a wallet buying into
+    // its own fresh deployments (one top wallet "bought" five $2k-cap tokens for $17k each).
+    smartMoneyMinLiquidity: parseFloat(process.env.SMART_MONEY_MIN_LIQUIDITY || '10000'),
     alphaFreshWalletDays: parseInt(process.env.ALPHA_FRESH_WALLET_DAYS || '7', 10),
     alphaMaxFreshBuyerShare: parseFloat(process.env.ALPHA_MAX_FRESH_BUYER_SHARE || '0.5'),
     alphaMinWalletNetWorthUsd: parseFloat(process.env.ALPHA_MIN_WALLET_NET_WORTH_USD || '1000'),

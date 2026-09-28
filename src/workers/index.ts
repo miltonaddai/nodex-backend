@@ -5,6 +5,8 @@ import { syncAllTopTraders } from './sync-top-traders'
 import { syncAllTokens } from './sync-tokens'
 import { syncAllWallets } from './sync-wallets'
 import { refreshAllTokenMarketHealth } from './sync-market-health'
+import { syncAllInsiderPlays } from './sync-insiders'
+import { syncAllSmartMoneyBuys } from './sync-smart-money'
 
 let pipelineTimer: NodeJS.Timeout | null = null
 let healthTimer: NodeJS.Timeout | null = null
@@ -70,6 +72,8 @@ async function runPipeline(): Promise<void> {
   try {
     await syncAllTokens()
     await runHealthRefresh()
+    // Feeds the wallets page: tokens the most profitable wallets are net buying right now.
+    await syncAllSmartMoneyBuys()
     await syncAllTopTraders()
     // Raw trade ingestion feeds wallet_token_trades and wallet_token_performance, which every
     // downstream step reads. It had no call site at all, so coverage was frozen at whatever a
@@ -80,6 +84,9 @@ async function runPipeline(): Promise<void> {
     // nothing derived from our own ingested trades reached the wallets page.
     await refreshAllWalletTokenPerformance()
     await syncAllWallets()
+    // Runs last and on its own candidate list: the churn screen above rejects bundled launches,
+    // which are exactly the tokens this step exists to catch.
+    await syncAllInsiderPlays()
     // refreshTokenScores and syncAllHolderWealth are intentionally not run here.
     //
     // Both write token_analytics rows keyed by (chain, contract, period_days). Because the table
