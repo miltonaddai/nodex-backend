@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express'
-import { getSupabase } from '../services/supabase'
+import type { Session } from '@supabase/supabase-js'
+import { createAuthClient } from '../services/supabase'
 import {
   createDemoToken,
   getOrCreateDemoUser,
@@ -18,6 +19,18 @@ import { config } from '../config'
 const router = Router()
 
 // Auth: signup, login, profile
+
+/**
+ * The access token lasts an hour. The refresh token lets the browser get a new one without
+ * logging in again, so a session lasts until logout rather than until the first token expires.
+ */
+function sessionTokens(session: Session) {
+  return {
+    token: session.access_token,
+    refreshToken: session.refresh_token,
+    expiresAt: session.expires_at ?? null,
+  }
+}
 
 function parsePlan(value: unknown): SubscriptionPlan | undefined {
   if (value === 'starter' || value === 'pro') return value
@@ -42,8 +55,7 @@ router.post('/signup', async (req: Request, res: Response) => {
     })
   }
 
-  const supabase = getSupabase()
-  const { data, error } = await supabase.auth.signUp({ email, password })
+  const { data, error } = await createAuthClient().auth.signUp({ email, password })
   if (error) return res.status(400).json({ message: error.message })
 
   if (data.user) {
@@ -63,7 +75,7 @@ router.post('/signup', async (req: Request, res: Response) => {
 
   const profile = await getUserProfile(data.user!.id, data.user!.email ?? email)
   return res.json({
-    token: data.session.access_token,
+    ...sessionTokens(data.session),
     user: profile,
   })
 })
@@ -83,15 +95,24 @@ router.post('/login', async (req: Request, res: Response) => {
     })
   }
 
-  const supabase = getSupabase()
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+  const { data, error } = await createAuthClient().auth.signInWithPassword({ email, password })
   if (error) return res.status(401).json({ message: error.message })
 
   const profile = await getUserProfile(data.user.id, data.user.email ?? email)
-  return res.json({
-    token: data.session.access_token,
-    user: profile,
-  })
+  return res.json({ ...sessionTokens(data.session), user: profile })
+})
+
+/** Exchanges a refresh token for a new access token. The refresh token is single-use. */
+router.post('/refresh', async (req: Request, res: Response) => {
+  const refreshToken = typeof req.body.refreshToken === 'string' ? req.body.refreshToken : ''
+  if (!refreshToken) return res.status(400).json({ message: 'Refresh token is required' })
+  if (isDemoMode()) return res.status(400).json({ message: 'Demo sessions do not expire' })
+
+  const { data, error } = await createAuthClient().auth.refreshSession({ refresh_token: refreshToken })
+  if (error || !data.session) {
+    return res.status(401).json({ message: error?.message ?? 'Session expired, please log in again' })
+  }
+  return res.json(sessionTokens(data.session))
 })
 
 router.get('/me', authMiddleware, async (req: AuthRequest, res: Response) => {
