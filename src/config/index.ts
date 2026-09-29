@@ -63,6 +63,11 @@ export const config = {
     baseUrl: 'https://public-api.birdeye.so',
   },
 
+  fomo: {
+    // fomoapi.io, source of the tracked trader list (refreshed monthly by scripts/refresh-fomo-traders.ts).
+    apiKey: process.env.FOMO_API_KEY || '',
+  },
+
   blockscout: {
     // Keyed Blockscout gateway, used for Robinhood Chain holder counts.
     apiKey: process.env.BLOCKSCOUT_API_KEY || '',
@@ -216,27 +221,8 @@ export const config = {
     insiderTrackDays: parseInt(process.env.INSIDER_TRACK_DAYS || '14', 10),
     insiderMaxTracked: parseInt(process.env.INSIDER_MAX_TRACKED || '40', 10),
 
-    // --- Smart money: what the most profitable wallets are buying ---
-    // Leaderboard wallets scanned daily (50 per Birdeye call) to find traders with real profit.
-    smartMoneyLeaderboardDepth: parseInt(process.env.SMART_MONEY_LEADERBOARD_DEPTH || '2000', 10),
-    smartMoneyLeaderboardRefreshHours: parseInt(process.env.SMART_MONEY_LEADERBOARD_REFRESH_HOURS || '24', 10),
-    // Wallets tracked each run. Swaps are stored, so after a one-time backfill each run fetches
-    // only new swaps: about one Birdeye call per wallet that has traded since the last run.
-    smartMoneyWallets: parseInt(process.env.SMART_MONEY_WALLETS || '200', 10),
-    smartMoneyMinTrades30d: parseInt(process.env.SMART_MONEY_MIN_TRADES_30D || '10', 10),
-    // Above 100 trades a day is a bot. On Robinhood Chain five near-identical wallets at 3,800-4,350
-    // trades a month were all buying the same token.
-    smartMoneyMaxTrades30d: parseInt(process.env.SMART_MONEY_MAX_TRADES_30D || '3000', 10),
-    // Realized profit above this share of 30-day volume marks a wallet dumping tokens it got for
-    // free rather than trading. See DEFAULT_MAX_PROFIT_TO_VOLUME in lib/smart-money.
-    smartMoneyMaxProfitToVolume: parseFloat(process.env.SMART_MONEY_MAX_PROFIT_TO_VOLUME || '0.35'),
-    // Only live wallets are tracked: owned by the System Program, holding enough SOL to trade,
-    // and used recently. Burner wallets that were drained and closed fail all three.
-    smartMoneyMinSolBalance: parseFloat(process.env.SMART_MONEY_MIN_SOL_BALANCE || '0.1'),
-    // Robinhood Chain gas is cheap, but bot groups sat at 0.003-0.010 ETH each, so the floor is
-    // set just above them.
-    smartMoneyMinEthBalance: parseFloat(process.env.SMART_MONEY_MIN_ETH_BALANCE || '0.02'),
-    smartMoneyMaxIdleDays: parseInt(process.env.SMART_MONEY_MAX_IDLE_DAYS || '7', 10),
+    // --- Smart money: what the top FOMO traders are buying ---
+    // The tracked wallets come from src/data/fomo-top-traders.json (npm run fomo:refresh, monthly).
     smartMoneyBuyWindowHours: parseInt(process.env.SMART_MONEY_BUY_WINDOW_HOURS || '72', 10),
     // Caps the backfill for very active wallets (100 swaps per page).
     smartMoneyMaxSwapPages: parseInt(process.env.SMART_MONEY_MAX_SWAP_PAGES || '20', 10),

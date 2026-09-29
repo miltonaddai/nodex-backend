@@ -1,5 +1,5 @@
 -- ClickHouse schema for NodeX blockchain analytics
--- Final schema: includes every change through migrations/015-smart-money-swaps.sql.
+-- Final schema: includes every change through migrations/016-fomo-traders.sql.
 -- Run against your ClickHouse instance (NOT Supabase -- see ../supabase/schema.sql for user data)
 --
 -- Safe to run on a fresh or an existing database, and safe to rerun. Tables are created only if
@@ -257,6 +257,11 @@ CREATE TABLE IF NOT EXISTS nodex.smart_money_wallets (
     realized_pnl_30d Float64,
     volume_30d Float64,
     trades_30d UInt32,
+    handle String DEFAULT '',
+    display_name String DEFAULT '',
+    avatar_url String DEFAULT '',
+    followers UInt32 DEFAULT 0,
+    source LowCardinality(String) DEFAULT 'birdeye',
     updated_at DateTime DEFAULT now()
 ) ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (chain, wallet);
@@ -400,3 +405,10 @@ ALTER TABLE nodex.wallet_token_performance
 
 ALTER TABLE nodex.smart_money_buys
     ADD COLUMN IF NOT EXISTS buyer_realized_pnl_30d Float64 DEFAULT 0;
+
+ALTER TABLE nodex.smart_money_wallets
+    ADD COLUMN IF NOT EXISTS handle String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS display_name String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS avatar_url String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS followers UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS source LowCardinality(String) DEFAULT 'birdeye';

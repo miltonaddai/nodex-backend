@@ -605,47 +605,6 @@ export async function getPriceHistory(
     .filter((point) => point.unixTime > 0 && point.value > 0)
 }
 
-export interface LeaderboardTrader {
-  address: string
-  pnl: number
-  realizedPnl: number
-  unrealizedPnl: number
-  volume: number
-  trades: number
-}
-
-/**
- * One page of Birdeye's trader profit leaderboard. `type` is a window like 30d. Sorting by total
- * PnL surfaces paper gains and sorting by realized PnL surfaces accounting artifacts, and which
- * one holds the real traders differs by chain, so callers read both.
- */
-export async function getProfitLeaderboardPage(
-  type: 'today' | '1W' | '30d' | '90d',
-  offset: number,
-  limit = 50,
-  chain = 'solana',
-  sortBy: 'PnL' | 'realized_pnl' = 'PnL'
-): Promise<LeaderboardTrader[]> {
-  const params = new URLSearchParams({
-    type,
-    sort_by: sortBy,
-    sort_type: 'desc',
-    offset: String(offset),
-    limit: String(Math.min(Math.max(limit, 1), 50)),
-  })
-  const json = (await birdeyeFetch(`/trader/gainers-losers?${params}`, chain)) as {
-    data?: { items?: Record<string, unknown>[] }
-  } | null
-  return (json?.data?.items ?? []).map((row) => ({
-    address: str(row.address),
-    pnl: num(row.pnl),
-    realizedPnl: num(row.realized_pnl),
-    unrealizedPnl: num(row.unrealized_pnl),
-    volume: num(row.volume),
-    trades: num(row.trade_count),
-  }))
-}
-
 export interface WalletSwapSide {
   address: string
   symbol: string

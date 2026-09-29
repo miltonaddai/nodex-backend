@@ -404,28 +404,6 @@ export async function getTokenHolderBalances(mint: string, decimals: number, max
   return balances
 }
 
-export interface AccountSummary {
-  /** Program that owns the account. Ordinary wallets are owned by the System Program. */
-  owner: string
-  lamports: number
-}
-
-/** Owner and balance for many accounts. Missing entries are accounts that do not exist. */
-export async function getAccountSummaries(addresses: string[]): Promise<Map<string, AccountSummary>> {
-  const result = new Map<string, AccountSummary>()
-  for (let index = 0; index < addresses.length; index += 100) {
-    const batch = addresses.slice(index, index + 100)
-    const response = await heliusRpc<{ value?: Array<{ owner?: string; lamports?: number } | null> }>(
-      'getMultipleAccounts',
-      [batch, { encoding: 'base64', dataSlice: { offset: 0, length: 0 } }]
-    )
-    ;(response.value ?? []).forEach((account, i) => {
-      if (account?.owner) result.set(batch[i], { owner: account.owner, lamports: Number(account.lamports ?? 0) })
-    })
-  }
-  return result
-}
-
 /** Unix time of an address's most recent transaction, or null if it has none. */
 export async function getLastActivityTime(address: string): Promise<number | null> {
   const signatures = await heliusRpc<Array<{ blockTime?: number | null }>>('getSignaturesForAddress', [

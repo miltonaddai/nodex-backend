@@ -1,98 +1,10 @@
 /**
- * "What are the most profitable wallets buying right now?"
+ * "What are the top traders buying right now?"
  *
- * Birdeye's 30-day profit leaderboard is mostly noise at the top. Sorted by total PnL, the
- * leaders are one-trade wallets holding millions in unrealizable paper gains (token creators and
- * snipers on illiquid launches). Sorted by realized PnL, the leaders show +$42M realized offset
- * by -$42M unrealized, i.e. accounting artifacts with a total PnL near zero. The wallets worth
- * following are the ones whose profit is real and already taken: total and realized PnL agree.
- * In a sample of the top 200 by each sort, 18 wallets passed that test.
+ * Given each tracked wallet's recent swaps, works out which tokens it is net buying and ranks
+ * tokens by how many tracked wallets are in them. The wallets themselves come from FOMO's
+ * leaderboards (see fomo-traders.ts).
  */
-
-export interface TraderStats {
-  address: string
-  pnl: number
-  realizedPnl: number
-  volume: number
-  trades: number
-}
-
-/**
- * Realized profit above this share of volume means the wallet sold far more than it paid for:
- * profit/volume = (sold - cost) / (sold + cost), so 0.35 is selling about 2x what was bought.
- * Wallets well above it are dumping tokens they got for free (from their own launches or
- * bundles), which Birdeye counts as profit. On Robinhood Chain a group of six such wallets held
- * exactly 0.010 ETH each and sold 5-10x what they bought of the same tokens.
- */
-export const DEFAULT_MAX_PROFIT_TO_VOLUME = 0.35
-
-/** True when a leaderboard wallet's profit is real, taken, earned by trading, and not a one-off. */
-export function isProfitableTrader(
-  trader: TraderStats,
-  minTrades: number,
-  maxProfitToVolume = DEFAULT_MAX_PROFIT_TO_VOLUME,
-  maxTrades = Number.POSITIVE_INFINITY
-): boolean {
-  if (!trader.address || trader.pnl <= 0 || trader.realizedPnl <= 0) return false
-  if (trader.trades < minTrades || trader.trades > maxTrades) return false
-  if (trader.volume <= 0 || trader.realizedPnl / trader.volume > maxProfitToVolume) return false
-  // Most of the profit must be realized, and unrealized losses must not cancel it out.
-  return trader.realizedPnl >= trader.pnl * 0.5 && trader.pnl >= trader.realizedPnl * 0.5
-}
-
-export const SYSTEM_PROGRAM = '11111111111111111111111111111111'
-
-/**
- * True when an address is a wallet someone can still trade from. The leaderboard includes
- * addresses that no longer exist (burner wallets drained and closed after use: 22 of the first
- * 50 picks), accounts owned by programs rather than people, and wallets left with dust. None of
- * those will trade again, so following them shows nothing.
- */
-export function isLiveTradingWallet(
-  account: { owner: string; lamports: number } | undefined,
-  lastActivity: number | null,
-  opts: { minSol: number; maxIdleDays: number; now: number }
-): boolean {
-  if (!account || account.owner !== SYSTEM_PROGRAM) return false
-  if (account.lamports / 1e9 < opts.minSol) return false
-  if (lastActivity === null) return false
-  return opts.now - lastActivity <= opts.maxIdleDays * 86_400
-}
-
-/**
- * The EVM equivalent of isLiveTradingWallet, for Robinhood Chain. Every address exists on an EVM
- * chain, so the tests are: it is a person's wallet rather than a contract (no code, or only an
- * EIP-7702 delegation marker), it holds enough ETH to pay gas, and it has been used recently.
- */
-export function isLiveEvmWallet(
-  account: { code: string; balanceWei: bigint } | undefined,
-  lastActivity: number | null,
-  opts: { minNative: number; maxIdleDays: number; now: number }
-): boolean {
-  if (!account) return false
-  const isContract = account.code !== '0x' && !account.code.toLowerCase().startsWith('0xef0100')
-  if (isContract) return false
-  if (Number(account.balanceWei) / 1e18 < opts.minNative) return false
-  if (lastActivity === null) return false
-  return opts.now - lastActivity <= opts.maxIdleDays * 86_400
-}
-
-/** Picks the top wallets by realized profit from one or more leaderboard pages. */
-export function selectSmartWallets<T extends TraderStats>(
-  traders: T[],
-  minTrades: number,
-  limit: number,
-  maxProfitToVolume = DEFAULT_MAX_PROFIT_TO_VOLUME,
-  maxTrades = Number.POSITIVE_INFINITY
-): T[] {
-  const unique = new Map<string, T>()
-  for (const trader of traders) {
-    if (isProfitableTrader(trader, minTrades, maxProfitToVolume, maxTrades) && !unique.has(trader.address)) {
-      unique.set(trader.address, trader)
-    }
-  }
-  return [...unique.values()].sort((a, b) => b.realizedPnl - a.realizedPnl).slice(0, limit)
-}
 
 /**
  * Tokens that are money rather than positions: the native coin, its wrapped form, stablecoins
@@ -262,44 +174,4 @@ export function aggregateBuying(
     (a, b) =>
       b.walletCount - a.walletCount || b.buyerRealizedPnl - a.buyerRealizedPnl || b.netBuyUsd - a.netBuyUsd
   )
-}
-
-export interface WalletBehavior {
-  tokenBuyUsd: number
-  tokenSellUsd: number
-  /** Volume of swaps between quote assets only, e.g. ETH to WETH or SOL to USDC. */
-  quoteOnlyUsd: number
-  totalUsd: number
-}
-
-/** Buying, selling and quote-churn totals across a wallet's recent swaps. */
-export function summarizeBehavior(swaps: Swap[], chain = 'solana'): WalletBehavior {
-  const behavior: WalletBehavior = { tokenBuyUsd: 0, tokenSellUsd: 0, quoteOnlyUsd: 0, totalUsd: 0 }
-  for (const swap of swaps) {
-    const usd = Number.isFinite(swap.volumeUsd) ? Math.max(0, swap.volumeUsd) : 0
-    behavior.totalUsd += usd
-    const tokenSides = [swap.base, swap.quote].filter((side) => side.address && !isQuoteAsset(chain, side.address))
-    if (tokenSides.length === 0) {
-      behavior.quoteOnlyUsd += usd
-      continue
-    }
-    for (const side of tokenSides) {
-      if (side.uiChangeAmount > 0) behavior.tokenBuyUsd += usd
-      else if (side.uiChangeAmount < 0) behavior.tokenSellUsd += usd
-    }
-  }
-  return behavior
-}
-
-export type BehaviorVerdict = 'trader' | 'dumping' | 'quote_churn'
-
-/**
- * Catches wallets whose recent swaps are not trading, even if their 30-day stats looked fine:
- * dumping a stockpile (selling far more than they bought) or churning between quote assets like
- * an arbitrage bot. Both kinds showed up among the top Robinhood Chain wallets.
- */
-export function classifyBehavior(behavior: WalletBehavior): BehaviorVerdict {
-  if (behavior.tokenSellUsd >= 5_000 && behavior.tokenSellUsd > behavior.tokenBuyUsd * 3) return 'dumping'
-  if (behavior.totalUsd > 0 && behavior.quoteOnlyUsd / behavior.totalUsd > 0.8) return 'quote_churn'
-  return 'trader'
 }

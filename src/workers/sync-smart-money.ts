@@ -1,39 +1,22 @@
 import { config } from '../config'
-import {
-  aggregateBuying,
-  classifyBehavior,
-  isLiveEvmWallet,
-  isLiveTradingWallet,
-  selectSmartWallets,
-  summarizeBehavior,
-  summarizeWalletFlows,
-  type Swap,
-  type TokenFlow,
-} from '../lib/smart-money'
-import { getProfitLeaderboardPage, getWalletSwapsSince, type LeaderboardTrader } from '../services/birdeye'
+import { fomoListAgeDays, fomoTraderList, isFomoListStale, walletForChain } from '../lib/fomo-traders'
+import { aggregateBuying, summarizeWalletFlows, type Swap, type TokenFlow } from '../lib/smart-money'
+import { getWalletSwapsSince } from '../services/birdeye'
 import { insertClickhouse, queryClickhouse } from '../services/clickhouse'
-import { getRobinhoodAccountSummaries } from '../services/alchemy'
 import { getTokenInfo, getTokenMarketHealth } from '../services/dexscreener'
-import { getAccountSummaries, getLastActivityTime } from '../services/helius'
+import { getFomoAlerts } from '../services/fomo'
+import { getLastActivityTime } from '../services/helius'
 import { cacheDeletePattern } from '../services/redis'
 
 /**
- * Smart money: tokens the most profitable wallets of the last 30 days are net buying now.
+ * Smart money: tokens the top FOMO traders are net buying now.
  *
- * The wallet list comes from Birdeye's 30-day leaderboard and changes slowly, so it is refreshed
- * once a day. What those wallets are buying is refreshed every run. Runs for Solana and Robinhood
- * Chain. The chains differ only in how a live wallet is recognised and where activity is read.
+ * The wallets come from FOMO's leaderboards, saved monthly to src/data/fomo-top-traders.json.
+ * They belong to named traders, so none of the Birdeye-era filtering for deployers, clone farms
+ * and bots is needed. What they are buying is refreshed every run, for Solana (their Solana
+ * wallets) and Robinhood Chain (their EVM wallets).
  */
 export const SMART_MONEY_CHAINS = new Set(['solana', 'robinhood'])
-
-/**
- * Swaps checked before a wallet is tracked: for dumping or quote churn, and for recent activity
- * (the newest swap stands in for last activity). This used to be a separate RPC call per wallet,
- * and on Robinhood Chain that call is one of Alchemy's most expensive.
- */
-function behaviorWindowSeconds(): number {
-  return config.worker.smartMoneyMaxIdleDays * 86_400
-}
 
 interface TrackedWallet {
   wallet: string
@@ -46,111 +29,54 @@ function formatDate(unixSeconds: number): string {
 }
 
 /**
- * Keeps leaderboard wallets that are still live, in profit order, until `limit` are found.
- * Account lookups are batched, so only the recent-activity check costs a call per wallet.
+ * Writes the saved FOMO list into smart_money_wallets for one chain. Skipped when the table
+ * already holds this version of the list, so it only does work after a monthly refresh.
  */
-async function keepLiveWallets(
-  chain: string,
-  candidates: LeaderboardTrader[],
-  limit: number
-): Promise<LeaderboardTrader[]> {
-  const addresses = candidates.map((trader) => trader.address)
-  const now = Math.floor(Date.now() / 1000)
-  const maxIdleDays = config.worker.smartMoneyMaxIdleDays
-  let isLive: (address: string, lastActivity: number | null) => boolean
-  if (chain === 'solana') {
-    const accounts = await getAccountSummaries(addresses)
-    const opts = { minSol: config.worker.smartMoneyMinSolBalance, maxIdleDays, now }
-    isLive = (address, lastActivity) => isLiveTradingWallet(accounts.get(address), lastActivity, opts)
-  } else {
-    const accounts = await getRobinhoodAccountSummaries(addresses)
-    const opts = { minNative: config.worker.smartMoneyMinEthBalance, maxIdleDays, now }
-    isLive = (address, lastActivity) => isLiveEvmWallet(accounts.get(address), lastActivity, opts)
+export async function syncTrackedWallets(chain: string, force = false): Promise<void> {
+  const list = fomoTraderList()
+  const version = `fomo:${list.generatedAt}`
+  if (isFomoListStale()) {
+    console.warn(
+      `[smart-money ${chain}] FOMO trader list is ${Math.floor(fomoListAgeDays())} days old. ` +
+        'Run npm run fomo:refresh, commit src/data/fomo-top-traders.json and redeploy.'
+    )
   }
 
-  const live: LeaderboardTrader[] = []
-  const rejected = { behavior: 0 }
-  for (const trader of candidates) {
-    if (live.length >= limit) break
-    // Skip the activity lookup for addresses that already fail on ownership or balance.
-    if (!isLive(trader.address, now)) continue
-    try {
-      // One page of recent swaps shows when the wallet last traded and whether it trades or dumps.
-      const recent = await getWalletSwapsSince(trader.address, now - behaviorWindowSeconds(), 1, chain)
-      const lastSwap = recent.reduce<number | null>((latest, swap) => Math.max(latest ?? 0, swap.blockTime), null)
-      if (!isLive(trader.address, lastSwap)) continue
-      if (classifyBehavior(summarizeBehavior(recent, chain)) !== 'trader') {
-        rejected.behavior++
-        continue
-      }
-      live.push(trader)
-    } catch {
-      // An address whose activity cannot be checked is left out rather than guessed at.
-    }
-  }
-  if (rejected.behavior > 0) {
-    console.log(`[smart-money ${chain}] ${rejected.behavior} live wallets rejected for dumping or quote churn`)
-  }
-  return live
-}
-
-/** Rebuilds the tracked wallet list when it is older than the refresh interval, or when forced. */
-export async function refreshLeaderboardIfStale(chain: string, force = false): Promise<void> {
-  const [latest] = await queryClickhouse<{ age_hours: number | null }>(
-    `SELECT dateDiff('hour', max(updated_at), now()) AS age_hours
-     FROM smart_money_wallets WHERE chain = {chain:String}`,
+  const [current] = await queryClickhouse<{ source: string }>(
+    `SELECT any(source) AS source FROM smart_money_wallets
+     WHERE chain = {chain:String}
+       AND updated_at = (SELECT max(updated_at) FROM smart_money_wallets WHERE chain = {chain:String})`,
     { chain }
   )
-  const age = latest?.age_hours
-  if (!force && age !== null && age !== undefined && Number(age) < config.worker.smartMoneyLeaderboardRefreshHours) {
-    const [{ n }] = await queryClickhouse<{ n: string }>(
-      `SELECT count() AS n FROM smart_money_wallets WHERE chain = {chain:String}`,
-      { chain }
-    )
-    if (Number(n) > 0) return
-  }
+  if (!force && current?.source === version) return
 
-  // Both sort orders: on Solana the real traders surface under total PnL, on Robinhood Chain under
-  // realized PnL (24 versus 1,468 of the top 2,000). selectSmartWallets deduplicates.
-  const traders: LeaderboardTrader[] = []
-  for (const sortBy of ['PnL', 'realized_pnl'] as const) {
-    for (let offset = 0; offset < config.worker.smartMoneyLeaderboardDepth; offset += 50) {
-      const page = await getProfitLeaderboardPage('30d', offset, 50, chain, sortBy)
-      traders.push(...page)
-      if (page.length < 50) break
-    }
-  }
-  const profitable = selectSmartWallets(
-    traders,
-    config.worker.smartMoneyMinTrades30d,
-    Number.POSITIVE_INFINITY,
-    config.worker.smartMoneyMaxProfitToVolume,
-    config.worker.smartMoneyMaxTrades30d
-  )
-  const picked = await keepLiveWallets(chain, profitable, config.worker.smartMoneyWallets)
-  if (picked.length === 0) {
-    console.warn(`[smart-money ${chain}] No live profitable wallets found in ${traders.length} leaderboard rows; keeping the previous list`)
+  const traders = list.traders.filter((trader) => walletForChain(trader, chain))
+  if (traders.length === 0) {
+    console.warn(`[smart-money ${chain}] FOMO trader list has no wallets for this chain; keeping the previous list`)
     return
   }
-
   const updatedAt = formatDate(Math.floor(Date.now() / 1000))
   await insertClickhouse(
     'smart_money_wallets',
-    picked.map((trader, index) => ({
-      wallet: trader.address,
+    traders.map((trader) => ({
+      wallet: walletForChain(trader, chain),
       chain,
-      rank: index + 1,
-      pnl_30d: trader.pnl,
-      realized_pnl_30d: trader.realizedPnl,
-      volume_30d: trader.volume,
+      rank: trader.rank,
+      // FOMO reports total PnL without a realized split. Traders only on the 7-day, all-time or
+      // 24-hour boards have no 30-day figure.
+      pnl_30d: trader.pnl30dUsd ?? 0,
+      realized_pnl_30d: trader.pnl30dUsd ?? 0,
+      volume_30d: trader.volumeUsd,
       trades_30d: Math.round(trader.trades),
+      handle: trader.handle,
+      display_name: trader.displayName,
+      avatar_url: trader.avatar,
+      followers: Math.round(trader.followers),
+      source: version,
       updated_at: updatedAt,
     }))
   )
-  console.log(
-    `[smart-money ${chain}] Leaderboard refreshed: ${profitable.length} of ${traders.length} wallets have real 30-day profit, ` +
-      `tracking the top ${picked.length} that are live wallets`
-  )
+  console.log(`[smart-money ${chain}] Tracking ${traders.length} FOMO traders from the list saved ${list.generatedAt}`)
 }
 
 interface StoredSwap {
@@ -163,6 +89,76 @@ interface StoredSwap {
   quote_address: string
   quote_symbol: string
   quote_change: number
+}
+
+/** Placeholder quote side for feed trades: FOMO reports the USD value, not what was paid with. */
+const FEED_QUOTE = { address: '0x0000000000000000000000000000000000000000', symbol: 'ETH' }
+
+/**
+ * The feed returns the newest events first and holds roughly the latest 200 per filter (about
+ * 7 hours of Robinhood Chain buys), so a run every 2 hours reads everything since the last one.
+ */
+const FEED_PAGE = 200
+
+/**
+ * Stores tracked traders' Robinhood Chain trades from FOMO's feed. FOMO submits these trades
+ * through a relayer, so the trader's wallet never sends the swap and Birdeye's per-wallet swap
+ * history shows almost nothing (1 of 212 wallets had a swap in 72 hours). The feed reports each
+ * trade by trader, with its USD value. One buy and one sell call per run, 250 credits.
+ */
+async function fetchFeedSwaps(
+  chain: string,
+  wallets: TrackedWallet[],
+  windowStart: number
+): Promise<{ fetched: number; skipped: number; stored: number }> {
+  const tracked = new Set(wallets.map((w) => w.wallet.toLowerCase()))
+  const walletByUser = new Map<string, string>()
+  for (const trader of fomoTraderList().traders) {
+    const wallet = walletForChain(trader, chain)
+    if (wallet && tracked.has(wallet.toLowerCase())) walletByUser.set(trader.userId, wallet)
+  }
+
+  const fetchedAt = formatDate(Math.floor(Date.now() / 1000))
+  const rows: Record<string, unknown>[] = []
+  let fetched = 0
+  for (const type of ['buy', 'sell'] as const) {
+    // No `since`: the feed only holds its newest page, and stored rows deduplicate on event id,
+    // so reading the whole page each run is both complete and safe to repeat.
+    const alerts = (await getFomoAlerts({ type, chain, limit: FEED_PAGE })).filter(
+      (alert) => alert.ts >= windowStart * 1000
+    )
+    // Events are only lost if one page spans less time than the gap between runs.
+    const oldest = Math.min(...alerts.map((alert) => alert.ts))
+    const runGapMs = config.worker.tokenSyncIntervalMinutes * 60_000
+    if (alerts.length >= FEED_PAGE && oldest > Date.now() - runGapMs) {
+      console.warn(`[smart-money ${chain}] FOMO ${type} feed covers less than one run interval; some ${type}s were missed`)
+    }
+    for (const alert of alerts) {
+      const wallet = walletByUser.get(alert.userId)
+      if (!wallet || !alert.tokenAddress || !alert.ts) continue
+      fetched++
+      const sign = type === 'buy' ? 1 : -1
+      rows.push({
+        chain,
+        wallet,
+        tx_hash: alert.eventId,
+        ins_index: 0,
+        inner_ins_index: 0,
+        block_time: formatDate(Math.floor(alert.ts / 1000)),
+        // Some sell events carry a negative value. The direction is already in the sign above.
+        volume_usd: Math.abs(Number(alert.usdValue ?? 0)),
+        base_address: alert.tokenAddress,
+        base_symbol: alert.token ?? '',
+        base_change: sign,
+        quote_address: FEED_QUOTE.address,
+        quote_symbol: FEED_QUOTE.symbol,
+        quote_change: -sign,
+        fetched_at: fetchedAt,
+      })
+    }
+  }
+  if (rows.length > 0) await insertClickhouse('smart_money_swaps', rows)
+  return { fetched, skipped: 0, stored: rows.length }
 }
 
 /**
@@ -262,23 +258,14 @@ async function loadWalletFlows(
     byWallet.set(row.wallet, swaps)
   }
   const flows = new Map<string, Map<string, TokenFlow>>()
-  let excluded = 0
-  for (const [wallet, swaps] of byWallet) {
-    // Wallets can start dumping or churning after they were picked. Leave them out of the count.
-    if (classifyBehavior(summarizeBehavior(swaps, chain)) !== 'trader') {
-      excluded++
-      continue
-    }
-    flows.set(wallet, summarizeWalletFlows(swaps, chain))
-  }
-  if (excluded > 0) console.log(`[smart-money ${chain}] ${excluded} tracked wallets skipped this run for dumping or quote churn`)
+  for (const [wallet, swaps] of byWallet) flows.set(wallet, summarizeWalletFlows(swaps, chain))
   return flows
 }
 
 export async function syncSmartMoneyBuys(chain: string): Promise<void> {
   if (!SMART_MONEY_CHAINS.has(chain)) return
-  if (chain === 'robinhood' && !config.alchemy.robinhoodUrl) {
-    console.warn('[smart-money] ALCHEMY_ROBINHOOD_URL not set, skipping Robinhood Chain')
+  if (chain === 'robinhood' && !config.fomo.apiKey) {
+    console.warn('[smart-money robinhood] FOMO_API_KEY not set, skipping Robinhood Chain')
     return
   }
   if (!config.birdeye.apiKey) {
@@ -286,7 +273,7 @@ export async function syncSmartMoneyBuys(chain: string): Promise<void> {
     return
   }
 
-  await refreshLeaderboardIfStale(chain)
+  await syncTrackedWallets(chain)
 
   // The latest leaderboard refresh defines the tracked set. Wallets that fell off keep old rows.
   const wallets = await queryClickhouse<TrackedWallet>(
@@ -300,7 +287,11 @@ export async function syncSmartMoneyBuys(chain: string): Promise<void> {
 
   const now = Math.floor(Date.now() / 1000)
   const windowStart = now - config.worker.smartMoneyBuyWindowHours * 3600
-  const { fetched, skipped, stored } = await fetchNewSwaps(chain, wallets, windowStart)
+  // Robinhood Chain trades go through FOMO's relayer, so they come from FOMO's feed instead.
+  const { fetched, skipped, stored } =
+    chain === 'robinhood'
+      ? await fetchFeedSwaps(chain, wallets, windowStart)
+      : await fetchNewSwaps(chain, wallets, windowStart)
   const walletFlows = await loadWalletFlows(chain, wallets, windowStart)
 
   const walletProfit = new Map(wallets.map((w) => [w.wallet, Number(w.realized_pnl_30d)]))

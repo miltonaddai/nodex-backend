@@ -51,6 +51,10 @@ interface WalletRow {
   realized_pnl_30d: number
   volume_30d: number
   trades_30d: number
+  handle: string
+  display_name: string
+  avatar_url: string
+  followers: number
   updated_at: string
 }
 
@@ -58,7 +62,8 @@ function iso(value: string): string {
   return `${value.replace(' ', 'T')}Z`
 }
 
-const LATEST_WALLETS = `SELECT wallet, rank, pnl_30d, realized_pnl_30d, volume_30d, trades_30d, updated_at
+const LATEST_WALLETS = `SELECT wallet, rank, pnl_30d, realized_pnl_30d, volume_30d, trades_30d, handle, display_name,
+    avatar_url, followers, updated_at
   FROM smart_money_wallets FINAL
   WHERE chain = {chain:String}
     AND updated_at = (SELECT max(updated_at) FROM smart_money_wallets WHERE chain = {chain:String})`
@@ -71,6 +76,10 @@ function mapWallet(row: WalletRow) {
     realizedPnl30d: Number(row.realized_pnl_30d),
     volume30d: Number(row.volume_30d),
     trades30d: Number(row.trades_30d),
+    handle: row.handle || null,
+    displayName: row.display_name || null,
+    avatarUrl: row.avatar_url || null,
+    followers: Number(row.followers),
   }
 }
 
@@ -102,6 +111,9 @@ function mapBuy(row: BuyRow, rank: number, walletsByAddress: Map<string, Tracked
       lastBuyAt: row.wallet_last_buy_at[i] ? iso(row.wallet_last_buy_at[i]) : null,
       rank: walletsByAddress.get(address)?.rank ?? null,
       realizedPnl30d: walletsByAddress.get(address)?.realizedPnl30d ?? null,
+      handle: walletsByAddress.get(address)?.handle ?? null,
+      displayName: walletsByAddress.get(address)?.displayName ?? null,
+      avatarUrl: walletsByAddress.get(address)?.avatarUrl ?? null,
     })),
   }
 }
@@ -131,7 +143,7 @@ router.get('/buys', authMiddleware, subscriptionMiddleware, async (req: Request,
   if (!CHAINS.has(chain)) return res.json({ ...empty, message: 'Smart money tracking covers Solana and Robinhood Chain.' })
   if (!isClickhouseConfigured()) return res.json(empty)
 
-  const cacheKey = `v2:smart-money:buys:${chain}:${page}:${pageSize}:${sortBy}:${sortOrder}`
+  const cacheKey = `v3:smart-money:buys:${chain}:${page}:${pageSize}:${sortBy}:${sortOrder}`
   try {
     const result = await getSnapshot(cacheKey, async () => {
       const latest = `snapshot_at = (SELECT max(snapshot_at) FROM smart_money_buys WHERE chain = {chain:String})`
@@ -179,7 +191,7 @@ router.get('/wallets', authMiddleware, subscriptionMiddleware, async (req: Reque
   const chain = (req.query.chain as string) || 'solana'
   if (!CHAINS.has(chain) || !isClickhouseConfigured()) return res.json({ items: [], lastUpdated: null })
   try {
-    const result = await getSnapshot(`v2:smart-money:wallets:${chain}`, async () => {
+    const result = await getSnapshot(`v3:smart-money:wallets:${chain}`, async () => {
       const [rows, schedule] = await Promise.all([
         queryClickhouse<WalletRow>(`${LATEST_WALLETS} ORDER BY rank`, { chain }),
         getPipelineSchedule().catch(() => null),
