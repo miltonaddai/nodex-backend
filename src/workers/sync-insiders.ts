@@ -65,23 +65,28 @@ function parseDate(value: string): number {
   return Math.floor(Date.parse(`${value.replace(' ', 'T')}Z`) / 1000)
 }
 
-async function analyzeLaunch(
-  token: TokenData,
-  supply: number
+/**
+ * Analyzes a token's launch window for insider bundles. Also used by the token scanner, which
+ * passes a smaller funder-lookup budget to keep an interactive scan quick.
+ */
+export async function analyzeLaunch(
+  mint: string,
+  supply: number,
+  funderLookups = config.worker.insiderFunderLookups
 ): Promise<{ report: LaunchInsiderReport; launchedAt: number } | null> {
-  const signatures = await getSignaturesOldestFirst(token.address, 1000)
+  const signatures = await getSignaturesOldestFirst(mint, 1000)
   const first = signatures.find((s) => s.blockTime)
   if (!first?.blockTime) return null
   // The window is timed from the first token movement inside collectLaunchActivity, since
   // trading can open well after the mint is created.
   const earliest = signatures.filter((s) => !s.err).slice(0, config.worker.insiderMaxLaunchTxs)
   const txs = await parseTransactions<LaunchTransaction>(earliest.map((s) => s.signature))
-  const activity = collectLaunchActivity(txs, token.address, config.worker.insiderLaunchWindowSeconds)
+  const activity = collectLaunchActivity(txs, mint, config.worker.insiderLaunchWindowSeconds)
 
   const lookups = [...activity.buyers.values()]
     .filter((buyer) => buyer.bought + buyer.received > 0)
     .sort((a, b) => b.bought + b.received - (a.bought + a.received))
-    .slice(0, config.worker.insiderFunderLookups)
+    .slice(0, funderLookups)
   const funders = new Map<string, string | null>()
   for (const buyer of lookups) {
     try {
@@ -161,7 +166,7 @@ export async function syncInsiderPlays(chain: string): Promise<void> {
     try {
       const { supply } = await getTokenSupply(token.address)
       if (supply <= 0) continue
-      const result = await analyzeLaunch(token, supply)
+      const result = await analyzeLaunch(token.address, supply)
       if (!result) continue
       newRows.push({
         contract: token.address,
@@ -190,9 +195,17 @@ export async function syncInsiderPlays(chain: string): Promise<void> {
             insider_acquired_pct, launch_score, evidence, holders
      FROM token_insider_analysis FINAL
      WHERE chain = {chain:String} AND launched_at >= now() - toIntervalDay({trackDays:UInt16})
+       -- A token whose refresh already found its pool pulled is not refreshed again. New
+       -- analyses have not been refreshed yet (updated_at equals analyzed_at), so they stay in.
+       AND NOT (liquidity < {minLiquidity:Float64} AND updated_at > analyzed_at)
      ORDER BY insider_score DESC
      LIMIT {limit:UInt32}`,
-    { chain, trackDays: config.worker.insiderTrackDays, limit: config.worker.insiderMaxTracked }
+    {
+      chain,
+      trackDays: config.worker.insiderTrackDays,
+      limit: config.worker.insiderMaxTracked,
+      minLiquidity: config.worker.insiderMinLiquidity,
+    }
   )
   const tracked = new Map<string, StoredAnalysis>()
   for (const row of stored) tracked.set(row.contract, row)
@@ -240,7 +253,9 @@ export async function syncInsiderPlays(chain: string): Promise<void> {
       console.warn(`[insiders] Refresh failed for ${row.symbol} (${row.contract}):`, error)
       // Keep a newly analyzed token even if its first refresh fails.
       if (newRows.some((r) => r.contract === row.contract)) {
-        refreshed.push({ ...row, chain, updated_at: formatDate(Math.floor(Date.now() / 1000)) })
+        // Keep updated_at equal to analyzed_at: liquidity was never measured, so the next run
+        // must refresh it rather than treat the missing value as a pulled pool.
+        refreshed.push({ ...row, chain, updated_at: row.analyzed_at })
       }
     }
   }
@@ -264,7 +279,7 @@ export async function syncAllInsiderPlays(): Promise<void> {
 /** Analyzes one token on demand, for backfilling a token the scan missed. */
 export async function analyzeInsiderToken(chain: string, token: TokenData): Promise<void> {
   const { supply } = await getTokenSupply(token.address)
-  const result = await analyzeLaunch(token, supply)
+  const result = await analyzeLaunch(token.address, supply)
   if (!result) throw new Error(`No launch transactions found for ${token.address}`)
   await insertClickhouse('token_insider_analysis', [
     {

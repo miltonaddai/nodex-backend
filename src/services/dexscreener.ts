@@ -18,7 +18,11 @@ export interface DexPair {
   liquidity?: { usd?: number }
   volume?: { h24?: number }
   priceChange?: { h24?: number }
-  info?: { imageUrl?: string }
+  info?: { imageUrl?: string; websites?: Array<{ url?: string }>; socials?: Array<{ type?: string; url?: string }> }
+  dexId?: string
+  /** Unix milliseconds. */
+  pairCreatedAt?: number
+  txns?: { h24?: { buys?: number; sells?: number } }
 }
 
 export interface TokenMarketHealth {
@@ -148,4 +152,54 @@ export async function getTokenInfo(chain: string, addresses: string[]): Promise<
 
 export function getSolanaTokenMarketHealth(addresses: string[]): Promise<Map<string, TokenMarketHealth>> {
   return getTokenMarketHealth('solana', addresses)
+}
+
+/** Every pool Dexscreener lists for one token, largest liquidity first. */
+export async function getTokenPairs(chain: string, address: string): Promise<DexPair[]> {
+  const lower = address.toLowerCase()
+  const pairs = (await fetchBatch([address], chain)).filter(
+    (pair) => pair.chainId === chain && pair.baseToken?.address?.toLowerCase() === lower
+  )
+  return pairs.sort((a, b) => number(b.liquidity?.usd) - number(a.liquidity?.usd))
+}
+
+export interface TokenQuote {
+  price: number
+  marketCap: number
+  priceChange24h: number
+  volume24h: number
+  liquidity: number
+  imageUrl: string
+  /** Unix milliseconds of the token's oldest pool. */
+  firstPoolAt: number | null
+}
+
+/**
+ * Live price, market cap and 24h change for many tokens, with images, from one Dexscreener read
+ * per 30 tokens. Keys are the addresses as requested.
+ */
+export async function getTokenQuotes(chain: string, addresses: string[]): Promise<Map<string, TokenQuote>> {
+  const unique = [...new Set(addresses.filter(Boolean))]
+  const result = new Map<string, TokenQuote>()
+  for (let index = 0; index < unique.length; index += MAX_BATCH_SIZE) {
+    const batch = unique.slice(index, index + MAX_BATCH_SIZE)
+    const pairs = await fetchBatch(batch, chain)
+    for (const address of batch) {
+      const health = selectTokenMarketHealth(address, pairs, chain)
+      if (!health) continue
+      const own = pairs.filter((p) => p.chainId === chain && p.baseToken?.address?.toLowerCase() === address.toLowerCase())
+      const created = own.map((p) => number(p.pairCreatedAt)).filter((t) => t > 0)
+      result.set(address, {
+        price: health.price,
+        marketCap: health.marketCap || health.fdv,
+        priceChange24h: health.priceChange24h,
+        volume24h: health.volume24h,
+        liquidity: health.liquidity,
+        imageUrl: own.find((p) => p.info?.imageUrl)?.info?.imageUrl ?? '',
+        firstPoolAt: created.length ? Math.min(...created) : null,
+      })
+    }
+    if (index + MAX_BATCH_SIZE < unique.length) await sleep(250)
+  }
+  return result
 }

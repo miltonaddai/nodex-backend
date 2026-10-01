@@ -33,11 +33,17 @@ export interface WatchlistWallet {
   id: string
   name: string
   address: string
-  balance: number
-  pnl7d: number
-  winRate: number
-  lastActive: string
+  /** USD. Null when it could not be measured for this wallet. */
+  balance: number | null
+  pnl7d: number | null
+  /** Percent, 0-100. Null on Robinhood Chain, where no per-wallet trade history is available. */
+  winRate: number | null
+  lastActive: string | null
   chain: string
+  /** Set when the wallet belongs to a tracked FOMO trader. */
+  handle?: string | null
+  displayName?: string | null
+  avatarUrl?: string | null
   // True when the wallet is on the watchlist but has no row in wallet_analytics, so the
   // metrics below are placeholders rather than measured zeros.
   analyticsUnavailable?: boolean

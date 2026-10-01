@@ -2,6 +2,9 @@ import { randomUUID } from 'crypto'
 import { getMockTopTokens } from '../data/mock'
 import { isDemoMode } from './demo-auth'
 import { isClickhouseConfigured, queryClickhouse } from './clickhouse'
+import { getTokenQuotes, type TokenQuote } from './dexscreener'
+import { getTokenImage } from './helius'
+import { cacheGet, cacheSet } from './redis'
 
 export interface WatchlistToken {
   id: string
@@ -18,7 +21,7 @@ export interface WatchlistToken {
   churn: number
   launchedAt?: string
   ageDays?: number
-  /** No token_analytics row backs this token — the metrics above are placeholders. */
+  /** No live market data was found for this token — the metrics above are placeholders. */
   analyticsUnavailable?: boolean
 }
 
@@ -125,15 +128,56 @@ function applyMockMetrics(token: WatchlistToken): WatchlistToken {
   }
 }
 
+/** Live quotes are reused briefly so repeat visits do not re-hit Dexscreener. */
+const QUOTE_TTL_SECONDS = 60
+
+async function liveQuotes(contracts: string[], chain: string): Promise<Map<string, TokenQuote>> {
+  if (contracts.length === 0) return new Map()
+  const key = `watchlist:quotes:v1:${chain}:${[...contracts].sort().join(',')}`
+  const cached = await cacheGet<Array<[string, TokenQuote]>>(key)
+  if (cached) return new Map(cached)
+  try {
+    const quotes = await getTokenQuotes(chain, contracts)
+    // Dexscreener has no image for some tokens. On Solana the token's own metadata usually does.
+    if (chain === 'solana') {
+      for (const [contract, quote] of quotes) {
+        if (!quote.imageUrl) quote.imageUrl = (await getTokenImage(contract).catch(() => null)) ?? ''
+      }
+    }
+    await cacheSet(key, [...quotes.entries()], QUOTE_TTL_SECONDS)
+    return quotes
+  } catch (error) {
+    console.warn('Failed to load live quotes for token watchlist:', error)
+    return new Map()
+  }
+}
+
+/**
+ * Live market data for every tracked token, whichever page it was added from. Discovery's
+ * token_analytics only covers tokens that passed the churn screen, and its change figure is
+ * the 7-day change from when discovery last saw the token, so it only supplies churn and age.
+ */
 async function enrich(tokens: WatchlistToken[], chain: string): Promise<WatchlistToken[]> {
   if (isDemoMode()) return tokens.map(applyMockMetrics)
-  const analytics = await getTokenAnalytics(tokens.map((token) => token.contract), chain)
+  const contracts = tokens.map((token) => token.contract)
+  const [analytics, quotes] = await Promise.all([getTokenAnalytics(contracts, chain), liveQuotes(contracts, chain)])
   return tokens.map((token) => {
-    if (!analytics) return { ...token, analyticsUnavailable: true }
-    return applyAnalytics(
-      { ...token, analyticsUnavailable: !analytics.has(token.contract) },
-      analytics.get(token.contract)
-    )
+    const discovered = applyAnalytics(token, analytics?.get(token.contract))
+    const quote = quotes.get(token.contract)
+    if (!quote) return { ...discovered, analyticsUnavailable: !analytics?.has(token.contract) }
+    const ageDays =
+      discovered.ageDays ?? (quote.firstPoolAt ? Math.floor((Date.now() - quote.firstPoolAt) / 86_400_000) : undefined)
+    return {
+      ...discovered,
+      imageUrl: quote.imageUrl || discovered.imageUrl,
+      price: quote.price,
+      marketCap: quote.marketCap,
+      changePct: quote.priceChange24h,
+      volume: quote.volume24h,
+      liquidity: quote.liquidity,
+      ageDays,
+      analyticsUnavailable: false,
+    }
   })
 }
 

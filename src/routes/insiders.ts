@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
 import { PaginatedResult, parsePagination, parseSortOrder, pickSortColumn } from '../lib/pagination'
 import { getSnapshot, snapshotFreshUntil } from '../lib/snapshot-cache'
+import { config } from '../config'
 import { authMiddleware } from '../middleware/auth'
 import { subscriptionMiddleware } from '../middleware/subscription'
 import { getPipelineSchedule, isClickhouseConfigured, queryClickhouse } from '../services/clickhouse'
@@ -113,14 +114,18 @@ router.get('/', authMiddleware, subscriptionMiddleware, async (req: Request, res
   }
   if (!isClickhouseConfigured()) return res.json(empty)
 
-  const cacheKey = `v3:insiders:${chain}:${page}:${pageSize}:${sortBy}:${sortOrder}:${status}:${pattern}`
+  const cacheKey = `v4:insiders:${chain}:${page}:${pageSize}:${sortBy}:${sortOrder}:${status}:${pattern}`
   try {
     const result = await getSnapshot(cacheKey, async () => {
       const where = `chain = {chain:String} AND launch_score >= {minLaunchScore:Float32}
         AND insider_acquired_pct >= {minAcquired:Float32}
+        AND liquidity >= {minLiquidity:Float64}
         ${status ? 'AND insider_status = {status:String}' : ''}
         ${pattern ? 'AND price_pattern = {pattern:String}' : ''}`
-      const params = { chain, status, pattern, minLaunchScore: MIN_LAUNCH_SCORE, minAcquired: MIN_INSIDER_ACQUIRED_PCT, limit: pageSize, offset }
+      const params = { chain, status, pattern, minLaunchScore: MIN_LAUNCH_SCORE,
+        minAcquired: MIN_INSIDER_ACQUIRED_PCT,
+        minLiquidity: config.worker.insiderMinLiquidity,
+        limit: pageSize, offset }
       const [countRows, rows, schedule] = await Promise.all([
         queryClickhouse<{ total: string }>(
           `SELECT count() AS total FROM token_insider_analysis FINAL WHERE ${where}`,

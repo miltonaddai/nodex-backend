@@ -220,6 +220,10 @@ export const config = {
     // How long an analyzed token keeps being refreshed on the insider page.
     insiderTrackDays: parseInt(process.env.INSIDER_TRACK_DAYS || '14', 10),
     insiderMaxTracked: parseInt(process.env.INSIDER_MAX_TRACKED || '40', 10),
+    // Below this liquidity a token's pool has been pulled or drained: most insider launches with
+    // $0 liquidity also had no trades in the last hour. They are not tradeable, so they are hidden
+    // and no longer refreshed.
+    insiderMinLiquidity: parseFloat(process.env.INSIDER_MIN_LIQUIDITY || '5000'),
 
     // --- Smart money: what the top FOMO traders are buying ---
     // The tracked wallets come from src/data/fomo-top-traders.json (npm run fomo:refresh, monthly).

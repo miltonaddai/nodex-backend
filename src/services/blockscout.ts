@@ -48,3 +48,62 @@ export async function getHolderCounts(chain: string, tokens: string[]): Promise<
   }
   return result
 }
+
+async function blockscoutGet<T>(chain: string, path: string): Promise<T | null> {
+  const chainId = CHAIN_IDS[chain]
+  if (!chainId || !config.blockscout.apiKey) return null
+  await throttle()
+  const res = await fetch(`https://api.blockscout.com/${chainId}/api/v2${path}`, {
+    headers: { Authorization: `Bearer ${config.blockscout.apiKey}` },
+    signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
+  })
+  if (!res.ok) return null
+  return (await res.json()) as T
+}
+
+export interface EvmTokenHolder {
+  address: string
+  amount: number
+  isContract: boolean
+  name: string | null
+}
+
+type HolderItem = { value?: string; address?: { hash?: string; is_contract?: boolean; name?: string | null } }
+
+/** Top holders of an EVM token, with Blockscout's contract flag and address names. */
+export async function getEvmTokenHolders(
+  chain: string,
+  token: string
+): Promise<{ holders: EvmTokenHolder[]; supply: number; holderCount: number | null }> {
+  const [info, list] = await Promise.all([
+    blockscoutGet<{ total_supply?: string; decimals?: string; holders_count?: string }>(chain, `/tokens/${encodeURIComponent(token)}`),
+    blockscoutGet<{ items?: HolderItem[] }>(chain, `/tokens/${encodeURIComponent(token)}/holders`),
+  ])
+  const decimals = Number(info?.decimals ?? 18)
+  const holders = (list?.items ?? [])
+    .filter((item) => item.address?.hash)
+    .map((item) => ({
+      address: item.address!.hash!,
+      amount: Number(item.value ?? 0) / 10 ** decimals,
+      isContract: Boolean(item.address?.is_contract),
+      name: item.address?.name ?? null,
+    }))
+  const holderCount = Number(info?.holders_count)
+  return {
+    holders,
+    supply: Number(info?.total_supply ?? 0) / 10 ** decimals,
+    holderCount: Number.isFinite(holderCount) ? holderCount : null,
+  }
+}
+
+/** Native coin balance of an address, in whole coins. */
+export async function getEvmNativeBalance(chain: string, address: string): Promise<number | null> {
+  const info = await blockscoutGet<{ coin_balance?: string | null }>(chain, `/addresses/${encodeURIComponent(address)}`)
+  return info?.coin_balance ? Number(info.coin_balance) / 1e18 : null
+}
+
+/** Whether a contract's source is verified, or null when Blockscout cannot say. */
+export async function isContractVerified(chain: string, address: string): Promise<boolean | null> {
+  const info = await blockscoutGet<{ is_verified?: boolean }>(chain, `/smart-contracts/${encodeURIComponent(address)}`)
+  return typeof info?.is_verified === 'boolean' ? info.is_verified : null
+}

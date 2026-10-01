@@ -8,6 +8,7 @@ import walletRoutes from './routes/wallets'
 import tokenRoutes from './routes/tokens'
 import insiderRoutes from './routes/insiders'
 import smartMoneyRoutes from './routes/smart-money'
+import scannerRoutes from './routes/scanner'
 import watchlistRoutes from './routes/watchlist'
 // SUBSCRIPTIONS DISABLED — billing router kept in the tree, just not mounted.
 // import billingRoutes, { billingWebhook } from './routes/billing'
@@ -52,6 +53,7 @@ app.use('/api/wallets', walletRoutes)
 app.use('/api/tokens', tokenRoutes)
 app.use('/api/insiders', insiderRoutes)
 app.use('/api/smart-money', smartMoneyRoutes)
+app.use('/api/scanner', scannerRoutes)
 app.use('/api/watchlist', watchlistRoutes)
 
 

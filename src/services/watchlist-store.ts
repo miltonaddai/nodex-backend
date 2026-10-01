@@ -3,6 +3,14 @@ import type { WatchlistWallet } from '../data/mock'
 import { demoSeededChains, demoWatchlist, getMockWatchlist } from '../data/mock'
 import { isDemoMode } from './demo-auth'
 import { isClickhouseConfigured, queryClickhouse } from './clickhouse'
+import { getLiveWalletMetrics } from './wallet-live-metrics'
+
+/** Names saved by older builds of the wallets page, which prefixed every address. */
+const LEGACY_DEFAULT_NAME = /^Top wallet /
+
+function shortAddress(address: string): string {
+  return address.length > 11 ? `${address.slice(0, 4)}...${address.slice(-4)}` : address
+}
 
 interface WatchlistRow {
   id: string
@@ -111,27 +119,28 @@ export async function listWatchlist(userId: string | undefined, chain: string): 
   if (!data?.length) return []
 
   const rows = data as WatchlistRow[]
-  const analytics = await getAnalytics(rows.map((row) => row.address), chain)
+  const metrics = await getLiveWalletMetrics(chain, rows.map((row) => row.address))
 
-  // The watchlist is owned by Supabase, so a wallet stays listed even when its analytics
-  // have been wiped from ClickHouse. Flag those so the UI shows "no data" instead of
-  // presenting the placeholder zeros below as real measurements.
-  return rows.map((row) =>
-    applyAnalytics(
-      {
-        id: row.id,
-        name: row.name,
-        address: row.address,
-        chain: row.chain,
-        balance: 0,
-        pnl7d: 0,
-        winRate: 0,
-        lastActive: 'recently',
-        analyticsUnavailable: analytics ? !analytics.has(row.address) : true,
-      },
-      analytics?.get(row.address)
-    )
-  )
+  return rows.map((row) => {
+    const live = metrics.get(row.address)
+    const measured = Boolean(live && (live.balance !== null || live.pnl7d !== null || live.winRate !== null))
+    return {
+      id: row.id,
+      // Old default names repeated the address. Show the trader's name instead, or just the address.
+      name: LEGACY_DEFAULT_NAME.test(row.name) ? live?.displayName || shortAddress(row.address) : row.name,
+      address: row.address,
+      chain: row.chain,
+      balance: live?.balance ?? null,
+      pnl7d: live?.pnl7d ?? null,
+      winRate: live?.winRate ?? null,
+      lastActive: live?.lastActive ?? null,
+      handle: live?.handle ?? null,
+      displayName: live?.displayName ?? null,
+      avatarUrl: live?.avatarUrl ?? null,
+      // Flag wallets with nothing measured so the UI shows "no data" rather than placeholders.
+      analyticsUnavailable: !measured,
+    }
+  })
 }
 
 export async function addWatchlistWallet(

@@ -487,6 +487,13 @@ export async function getTraderGainersLosers(
   }))
 }
 
+interface PnlSummaryBody {
+  unique_tokens?: number
+  counts?: { total_trade?: number; win_rate?: number }
+  cashflow_usd?: { total_invested?: number; current_value?: number }
+  pnl?: { realized_profit_usd?: number; unrealized_usd?: number; total_usd?: number }
+}
+
 export async function getWalletPnlSummary(
   wallet: string,
   duration: PeriodConfig['birdeyePnlDuration']
@@ -495,28 +502,18 @@ export async function getWalletPnlSummary(
     `/wallet/v2/pnl/summary?wallet=${encodeURIComponent(wallet)}&duration=${encodeURIComponent(duration)}`
   )) as {
     data?: {
-      unique_tokens?: number
-      counts?: {
-        total_trade?: number
-        win_rate?: number
-      }
-      cashflow_usd?: {
-        total_invested?: number
-        current_value?: number
-      }
-      pnl?: {
-        realized_profit_usd?: number
-        unrealized_usd?: number
-        total_usd?: number
-      }
-    }
+      // Birdeye nests the figures under `summary`. Reading them from `data` directly returned
+      // zeros for every wallet.
+      summary?: PnlSummaryBody
+    } & PnlSummaryBody
   } | null
 
   if (!json?.data) return null
 
-  const counts = json.data.counts ?? {}
-  const cashflow = json.data.cashflow_usd ?? {}
-  const pnl = json.data.pnl ?? {}
+  const body = json.data.summary ?? json.data
+  const counts = body.counts ?? {}
+  const cashflow = body.cashflow_usd ?? {}
+  const pnl = body.pnl ?? {}
 
   return {
     realizedProfitUsd: num(pnl.realized_profit_usd),
@@ -526,7 +523,7 @@ export async function getWalletPnlSummary(
     totalTrades: num(counts.total_trade),
     currentValue: num(cashflow.current_value),
     totalInvested: num(cashflow.total_invested),
-    uniqueTokens: num(json.data.unique_tokens),
+    uniqueTokens: num(body.unique_tokens),
   }
 }
 
@@ -666,4 +663,40 @@ export async function getWalletSwapsSince(
     if (!json?.data?.has_next) break
   }
   return swaps
+}
+
+export interface TokenStats {
+  name: string
+  symbol: string
+  logoUrl: string
+  holders: number | null
+  uniqueWallets24h: number | null
+  buys24h: number | null
+  sells24h: number | null
+  socials: Record<string, string>
+}
+
+/** Trading and holder statistics for one token, from Birdeye's token overview. */
+export async function getTokenStats(address: string, chain: string): Promise<TokenStats | null> {
+  const json = (await birdeyeFetch(`/defi/token_overview?address=${encodeURIComponent(address)}`, birdeyeChain(chain))) as {
+    data?: Record<string, unknown>
+  } | null
+  const data = json?.data
+  if (!data) return null
+  const optional = (value: unknown) => (value === null || value === undefined ? null : num(value))
+  const extensions = (data.extensions ?? {}) as Record<string, unknown>
+  const socials: Record<string, string> = {}
+  for (const [key, value] of Object.entries(extensions)) {
+    if (typeof value === 'string' && value.startsWith('http')) socials[key] = value
+  }
+  return {
+    name: str(data.name),
+    symbol: str(data.symbol),
+    logoUrl: str(data.logoURI),
+    holders: optional(data.holder),
+    uniqueWallets24h: optional(data.uniqueWallet24h),
+    buys24h: optional(data.buy24h),
+    sells24h: optional(data.sell24h),
+    socials,
+  }
 }

@@ -412,3 +412,105 @@ export async function getLastActivityTime(address: string): Promise<number | nul
   ])
   return signatures[0]?.blockTime ?? null
 }
+
+// --- Token scanner ---------------------------------------------------------------------------
+
+export interface MintSecurity {
+  decimals: number
+  supply: number
+  mintAuthority: string | null
+  freezeAuthority: string | null
+  /** Token-2022 transfer fee in basis points, or 0. */
+  transferFeeBps: number
+  transferFeeAuthority: string | null
+  permanentDelegate: string | null
+}
+
+/** Supply and control settings of a mint, including Token-2022 extensions. */
+export async function getMintSecurity(mint: string): Promise<MintSecurity | null> {
+  const result = await heliusRpc<{ value?: { data?: { parsed?: { info?: Record<string, unknown> } } } | null }>(
+    'getAccountInfo',
+    [mint, { encoding: 'jsonParsed' }]
+  )
+  const info = result.value?.data?.parsed?.info
+  if (!info) return null
+  type Extension = { extension?: string; state?: Record<string, any> }
+  const extensions = (info.extensions as Extension[] | undefined) ?? []
+  const fee = extensions.find((e) => e.extension === 'transferFeeConfig')?.state
+  const delegate = extensions.find((e) => e.extension === 'permanentDelegate')?.state
+  const decimals = Number(info.decimals ?? 0)
+  return {
+    decimals,
+    supply: Number(info.supply ?? 0) / 10 ** decimals,
+    mintAuthority: (info.mintAuthority as string | null) ?? null,
+    freezeAuthority: (info.freezeAuthority as string | null) ?? null,
+    transferFeeBps: Number(fee?.newerTransferFee?.transferFeeBasisPoints ?? 0),
+    transferFeeAuthority: (fee?.transferFeeConfigAuthority as string | null) ?? null,
+    permanentDelegate: (delegate?.delegate as string | null) ?? null,
+  }
+}
+
+export interface TokenHolder {
+  owner: string
+  amount: number
+  /** True when the owner is a program account (pool, vault, launchpad) rather than a wallet. */
+  isProgramOwned: boolean
+  solBalance: number
+}
+
+/** The 20 largest holders of a token, resolved from token accounts to their owners. */
+export async function getLargestHolders(mint: string): Promise<TokenHolder[]> {
+  const largest = await heliusRpc<{ value?: Array<{ address: string; uiAmount?: number | null }> }>(
+    'getTokenLargestAccounts',
+    [mint]
+  )
+  const accounts = largest.value ?? []
+  if (accounts.length === 0) return []
+  const tokenAccounts = await heliusRpc<{ value?: Array<{ data?: { parsed?: { info?: { owner?: string } } } } | null> }>(
+    'getMultipleAccounts',
+    [accounts.map((a) => a.address), { encoding: 'jsonParsed' }]
+  )
+  const owners = (tokenAccounts.value ?? []).map((a) => a?.data?.parsed?.info?.owner ?? '')
+  const uniqueOwners = [...new Set(owners.filter(Boolean))]
+  const ownerAccounts = await heliusRpc<{ value?: Array<{ owner?: string; lamports?: number } | null> }>(
+    'getMultipleAccounts',
+    [uniqueOwners, { encoding: 'base64', dataSlice: { offset: 0, length: 0 } }]
+  )
+  const ownerInfo = new Map<string, { owner?: string; lamports?: number } | null>()
+  uniqueOwners.forEach((owner, i) => ownerInfo.set(owner, ownerAccounts.value?.[i] ?? null))
+
+  // Several token accounts can share one owner, so merge by owner.
+  const byOwner = new Map<string, TokenHolder>()
+  accounts.forEach((account, i) => {
+    const owner = owners[i]
+    if (!owner) return
+    const info = ownerInfo.get(owner)
+    const amount = Number(account.uiAmount ?? 0)
+    const existing = byOwner.get(owner)
+    if (existing) {
+      existing.amount += amount
+      return
+    }
+    byOwner.set(owner, {
+      owner,
+      amount,
+      isProgramOwned: Boolean(info?.owner && info.owner !== '11111111111111111111111111111111'),
+      solBalance: Number(info?.lamports ?? 0) / 1e9,
+    })
+  })
+  return [...byOwner.values()].sort((a, b) => b.amount - a.amount)
+}
+
+/** How much of one token a wallet holds now, across all its token accounts. */
+export async function getOwnerTokenBalance(mint: string, owner: string, decimals: number): Promise<number> {
+  const result = await heliusRpc<{ token_accounts?: Array<{ amount?: number }> }>('getTokenAccounts', { mint, owner, limit: 10 })
+  return (result.token_accounts ?? []).reduce((sum, account) => sum + Number(account.amount ?? 0), 0) / 10 ** decimals
+}
+
+/** A token's image from its on-chain metadata, for tokens Dexscreener has no image for. */
+export async function getTokenImage(mint: string): Promise<string | null> {
+  const asset = await heliusRpc<{
+    content?: { links?: { image?: string }; files?: Array<{ uri?: string; cdn_uri?: string }> }
+  }>('getAsset', { id: mint })
+  return asset.content?.links?.image || asset.content?.files?.[0]?.cdn_uri || asset.content?.files?.[0]?.uri || null
+}
