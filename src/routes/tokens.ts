@@ -2,11 +2,11 @@ import { Router, Request, Response } from 'express'
 import { getMockTopTokens } from '../data/mock'
 import { isValidPeriod, periodToDays, PERIOD_CONFIG } from '../lib/periods'
 import { getSnapshot, snapshotFreshUntil } from '../lib/snapshot-cache'
+import { pageRows, sortRows } from '../lib/sort-rows'
 import { PaginatedResult, parseNumericFilters, parsePagination, parseSortOrder, pickSortColumn } from '../lib/pagination'
 import { authMiddleware } from '../middleware/auth'
 import { subscriptionMiddleware } from '../middleware/subscription'
 import {
-  countClickhouseRows,
   getPipelineSchedule,
   getSnapshotLastUpdated,
   isClickhouseConfigured,
@@ -31,6 +31,17 @@ const TOKEN_SORT_MAP = {
   launchedAt: 'launched_at',
   name: 'name',
 } as const
+
+/** Upper bound on one chain and period's snapshot. Real snapshots hold a few hundred tokens. */
+const SNAPSHOT_MAX_ROWS = 5000
+
+type TokenItem = ReturnType<typeof mapTokenRow>
+
+/** The row field a sort column reads, e.g. market_cap -> marketCap. */
+function tokenSortField(column: string): keyof TokenItem {
+  const key = Object.entries(TOKEN_SORT_MAP).find(([, col]) => col === column)?.[0]
+  return (key ?? 'churn') as keyof TokenItem
+}
 
 const TOKEN_FILTER_KEYS = [
   'minChurn',
@@ -151,48 +162,55 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
   }
 
   const periodDays = isValidPeriod(period) ? periodToDays(period) : PERIOD_CONFIG['7D'].days
-  const filterKey = TOKEN_FILTER_KEYS.map((key) => `${key}:${numericFilters[key] ?? ''}`).join('|')
-  const cacheKey = `v7:tokens:top:${chain}:${period}:${page}:${pageSize}:${sortBy}:${sortOrder}:${filterKey}`
+  // One cached snapshot per chain and period. Sorting, filtering and paging happen in memory, so
+  // a new sort or page never waits on ClickHouse.
+  const cacheKey = `v8:tokens:snapshot:${chain}:${periodDays}`
 
   if (isClickhouseConfigured()) {
     try {
-      const result = await getSnapshot(cacheKey, async () => {
-        const total = await countClickhouseRows(
-          'token_analytics',
-          chain,
-          periodDays,
-          'recent-tokens',
-          numericFilters
-        )
-        if (total === 0 && Object.keys(numericFilters).length === 0) return null
+      const snapshot = await getSnapshot(cacheKey, async () => {
         const rows = await queryClickhousePaginated<ClickhouseToken>({
           table: 'token_analytics',
           chain,
           periodDays,
-          sortColumn: sortBy,
-          sortOrder,
-          limit: pageSize,
-          offset,
+          sortColumn: 'churn',
+          sortOrder: 'desc',
+          limit: SNAPSHOT_MAX_ROWS,
+          offset: 0,
           filter: 'recent-tokens',
-          numericFilters,
         })
-
+        if (rows.length === 0) return null
         const [lastUpdated, schedule] = await Promise.all([
           getSnapshotLastUpdated('token_analytics', chain, periodDays),
           getPipelineSchedule().catch(() => null),
         ])
         const value = {
-          items: rows.map((row, i) => mapTokenRow(row, offset + i + 1)),
-          page,
-          pageSize,
-          total,
+          items: rows.map((row) => mapTokenRow(row, 0)),
           lastUpdated,
           nextUpdate: schedule?.nextUpdate ?? null,
-          changeColumnLabel: changeColumnLabel(period),
         }
         return { value, freshUntil: snapshotFreshUntil(schedule) }
       })
-      if (result) return res.json(result)
+      if (snapshot) {
+        const filtered = snapshot.items.filter((row) =>
+          matchesTokenFilters(row as unknown as Record<string, unknown>, numericFilters)
+        )
+        // Same tie-breaks as the SQL ordering this replaced.
+        const sorted = sortRows(filtered, [
+          { key: tokenSortField(sortBy), order: sortOrder },
+          { key: 'independentBuyers', order: 'desc' },
+          { key: 'volume', order: 'desc' },
+        ])
+        return res.json({
+          items: pageRows(sorted, offset, pageSize),
+          page,
+          pageSize,
+          total: filtered.length,
+          lastUpdated: snapshot.lastUpdated,
+          nextUpdate: snapshot.nextUpdate,
+          changeColumnLabel: changeColumnLabel(period),
+        })
+      }
     } catch (err) {
       console.warn('ClickHouse token query failed, falling back to mock data:', err)
     }

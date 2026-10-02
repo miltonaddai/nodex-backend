@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
 import { PaginatedResult, parsePagination, parseSortOrder, pickSortColumn } from '../lib/pagination'
 import { getSnapshot, snapshotFreshUntil } from '../lib/snapshot-cache'
+import { pageRows, sortRows } from '../lib/sort-rows'
 import { config } from '../config'
 import { authMiddleware } from '../middleware/auth'
 import { subscriptionMiddleware } from '../middleware/subscription'
@@ -27,6 +28,16 @@ const MIN_LAUNCH_SCORE = 20
  * without controlling supply. A play needs insiders holding a real share after the launch.
  */
 const MIN_INSIDER_ACQUIRED_PCT = 1
+
+/** The mapped field each sort column reads. */
+const INSIDER_SORT_FIELDS = {
+  insider_score: 'insiderScore',
+  launch_score: 'launchScore',
+  insider_holding_pct: 'insiderHoldingPct',
+  insider_acquired_pct: 'insiderAcquiredPct',
+  market_cap: 'marketCap',
+  launched_at: 'launchedAt',
+} as const
 
 const STATUSES = new Set(['holding', 'distributing', 'exited'])
 const PATTERNS = new Set(['reclaiming', 'retracing', 'new_highs', 'ranging'])
@@ -114,28 +125,23 @@ router.get('/', authMiddleware, subscriptionMiddleware, async (req: Request, res
   }
   if (!isClickhouseConfigured()) return res.json(empty)
 
-  const cacheKey = `v4:insiders:${chain}:${page}:${pageSize}:${sortBy}:${sortOrder}:${status}:${pattern}`
+  // Every listed play is cached once (under a hundred tokens) and filtered, sorted and paged in
+  // memory, so changing the sort, page or filters never waits on ClickHouse.
+  const cacheKey = `v5:insiders:snapshot:${chain}`
   try {
-    const result = await getSnapshot(cacheKey, async () => {
-      const where = `chain = {chain:String} AND launch_score >= {minLaunchScore:Float32}
-        AND insider_acquired_pct >= {minAcquired:Float32}
-        AND liquidity >= {minLiquidity:Float64}
-        ${status ? 'AND insider_status = {status:String}' : ''}
-        ${pattern ? 'AND price_pattern = {pattern:String}' : ''}`
-      const params = { chain, status, pattern, minLaunchScore: MIN_LAUNCH_SCORE,
-        minAcquired: MIN_INSIDER_ACQUIRED_PCT,
-        minLiquidity: config.worker.insiderMinLiquidity,
-        limit: pageSize, offset }
-      const [countRows, rows, schedule] = await Promise.all([
-        queryClickhouse<{ total: string }>(
-          `SELECT count() AS total FROM token_insider_analysis FINAL WHERE ${where}`,
-          params
-        ),
+    const snapshot = await getSnapshot(cacheKey, async () => {
+      const [rows, schedule] = await Promise.all([
         queryClickhouse<InsiderRow>(
-          `SELECT * FROM token_insider_analysis FINAL WHERE ${where}
-           ORDER BY ${sortBy} ${sortOrder === 'asc' ? 'ASC' : 'DESC'}
-           LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
-          params
+          `SELECT * FROM token_insider_analysis FINAL
+           WHERE chain = {chain:String} AND launch_score >= {minLaunchScore:Float32}
+             AND insider_acquired_pct >= {minAcquired:Float32}
+             AND liquidity >= {minLiquidity:Float64}`,
+          {
+            chain,
+            minLaunchScore: MIN_LAUNCH_SCORE,
+            minAcquired: MIN_INSIDER_ACQUIRED_PCT,
+            minLiquidity: config.worker.insiderMinLiquidity,
+          }
         ),
         getPipelineSchedule().catch(() => null),
       ])
@@ -143,17 +149,27 @@ router.get('/', authMiddleware, subscriptionMiddleware, async (req: Request, res
         (latest, row) => (!latest || row.updated_at > latest ? row.updated_at : latest),
         null
       )
-      const value: PaginatedResult<InsiderItem> = {
-        items: rows.map((row, i) => mapInsiderRow(row, offset + i + 1)),
-        page,
-        pageSize,
-        total: Number(countRows[0]?.total ?? 0),
+      const value = {
+        items: rows.map((row) => mapInsiderRow(row, 0)),
         lastUpdated: lastUpdated ? `${lastUpdated.replace(' ', 'T')}Z` : null,
         nextUpdate: schedule?.nextUpdate ?? null,
       }
       return { value, freshUntil: snapshotFreshUntil(schedule) }
     })
-    return res.json(result ?? empty)
+    if (!snapshot) return res.json(empty)
+    const filtered = snapshot.items.filter(
+      (item) => (!status || item.insiderStatus === status) && (!pattern || item.pricePattern === pattern)
+    )
+    const sorted = sortRows(filtered, [{ key: INSIDER_SORT_FIELDS[sortBy as keyof typeof INSIDER_SORT_FIELDS] ?? 'insiderScore', order: sortOrder }])
+    const result: PaginatedResult<InsiderItem> = {
+      items: pageRows(sorted, offset, pageSize),
+      page,
+      pageSize,
+      total: filtered.length,
+      lastUpdated: snapshot.lastUpdated,
+      nextUpdate: snapshot.nextUpdate,
+    }
+    return res.json(result)
   } catch (err) {
     console.warn('ClickHouse insider query failed:', err)
     return res.json({ ...empty, message: 'Insider data is temporarily unavailable.' })

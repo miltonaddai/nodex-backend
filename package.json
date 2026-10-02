@@ -9,7 +9,7 @@
     "start:worker": "node dist/workers/index.js",
     "start:worker:once": "node dist/workers/index.js --once",
     "fomo:refresh": "tsx scripts/refresh-fomo-traders.ts",
-    "test": "tsx --test src/lib/alpha-scoring.test.ts src/lib/insider-detection.test.ts src/lib/smart-money.test.ts src/lib/fomo-traders.test.ts src/lib/token-risk.test.ts src/services/helius.test.ts src/services/dexscreener.test.ts",
+    "test": "tsx --test src/lib/alpha-scoring.test.ts src/lib/insider-detection.test.ts src/lib/smart-money.test.ts src/lib/fomo-traders.test.ts src/lib/token-risk.test.ts src/lib/sort-rows.test.ts src/services/helius.test.ts src/services/dexscreener.test.ts",
     "build": "tsc",
     "start": "node dist/index.js"
   },

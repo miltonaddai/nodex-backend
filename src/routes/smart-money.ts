@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express'
 import { config } from '../config'
 import { PaginatedResult, parsePagination, parseSortOrder, pickSortColumn } from '../lib/pagination'
 import { getSnapshot, snapshotFreshUntil } from '../lib/snapshot-cache'
+import { pageRows, sortRows, type SortKey } from '../lib/sort-rows'
 import { authMiddleware } from '../middleware/auth'
 import { subscriptionMiddleware } from '../middleware/subscription'
 import { getPipelineSchedule, isClickhouseConfigured, queryClickhouse } from '../services/clickhouse'
@@ -18,6 +19,16 @@ const BUY_SORT_MAP = {
   lastBuyAt: 'last_buy_at',
   priceChange24h: 'price_change_24h',
   buyerProfit: 'buyer_realized_pnl_30d',
+} as const
+
+/** The mapped field each sort column reads. */
+const BUY_SORT_FIELDS = {
+  wallet_count: 'walletCount',
+  net_buy_usd: 'netBuyUsd',
+  market_cap: 'marketCap',
+  last_buy_at: 'lastBuyAt',
+  price_change_24h: 'priceChange24h',
+  buyer_realized_pnl_30d: 'buyerRealizedPnl30d',
 } as const
 
 interface BuyRow {
@@ -143,43 +154,45 @@ router.get('/buys', authMiddleware, subscriptionMiddleware, async (req: Request,
   if (!CHAINS.has(chain)) return res.json({ ...empty, message: 'Smart money tracking covers Solana and Robinhood Chain.' })
   if (!isClickhouseConfigured()) return res.json(empty)
 
-  const cacheKey = `v3:smart-money:buys:${chain}:${page}:${pageSize}:${sortBy}:${sortOrder}`
+  // The whole latest run is cached once per chain (a couple of hundred tokens) and sorted and
+  // paged in memory, so a new sort or page never waits on ClickHouse.
+  const cacheKey = `v4:smart-money:buys:snapshot:${chain}`
   try {
-    const result = await getSnapshot(cacheKey, async () => {
+    const snapshot = await getSnapshot(cacheKey, async () => {
       const latest = `snapshot_at = (SELECT max(snapshot_at) FROM smart_money_buys WHERE chain = {chain:String})`
-      const direction = sortOrder === 'asc' ? 'ASC' : 'DESC'
-      // Ties on wallet count go to more profitable buyers, then to larger buys.
-      const tiebreak =
-        sortBy === 'wallet_count' ? `, buyer_realized_pnl_30d ${direction}, net_buy_usd ${direction}` : ''
-      const params = { chain, limit: pageSize, offset }
-      const [countRows, rows, walletRows, schedule] = await Promise.all([
-        queryClickhouse<{ total: string }>(
-          `SELECT count() AS total FROM smart_money_buys WHERE chain = {chain:String} AND ${latest}`,
-          params
-        ),
-        queryClickhouse<BuyRow>(
-          `SELECT * FROM smart_money_buys WHERE chain = {chain:String} AND ${latest}
-           ORDER BY ${sortBy} ${direction}${tiebreak}
-           LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
-          params
-        ),
+      const [rows, walletRows, schedule] = await Promise.all([
+        queryClickhouse<BuyRow>(`SELECT * FROM smart_money_buys WHERE chain = {chain:String} AND ${latest}`, { chain }),
         queryClickhouse<WalletRow>(LATEST_WALLETS, { chain }),
         getPipelineSchedule().catch(() => null),
       ])
       const walletsByAddress = new Map(walletRows.map((row) => [row.wallet, mapWallet(row)]))
-      const value: BuysResult = {
-        items: rows.map((row, i) => mapBuy(row, offset + i + 1, walletsByAddress)),
-        page,
-        pageSize,
-        total: Number(countRows[0]?.total ?? 0),
+      const value = {
+        items: rows.map((row) => mapBuy(row, 0, walletsByAddress)),
         lastUpdated: rows[0]?.snapshot_at ? iso(rows[0].snapshot_at) : null,
         nextUpdate: schedule?.nextUpdate ?? null,
         trackedWallets: walletRows.length,
-        windowHours: config.worker.smartMoneyBuyWindowHours,
       }
       return { value, freshUntil: snapshotFreshUntil(schedule) }
     })
-    return res.json(result ?? empty)
+    if (!snapshot) return res.json(empty)
+    // Ties on wallet count go to more profitable buyers, then to larger buys.
+    const keys: SortKey<BuyItem>[] = [
+      { key: BUY_SORT_FIELDS[sortBy as keyof typeof BUY_SORT_FIELDS] ?? 'walletCount', order: sortOrder },
+    ]
+    if (sortBy === 'wallet_count') {
+      keys.push({ key: 'buyerRealizedPnl30d', order: sortOrder }, { key: 'netBuyUsd', order: sortOrder })
+    }
+    const result: BuysResult = {
+      items: pageRows(sortRows(snapshot.items, keys), offset, pageSize),
+      page,
+      pageSize,
+      total: snapshot.items.length,
+      lastUpdated: snapshot.lastUpdated,
+      nextUpdate: snapshot.nextUpdate,
+      trackedWallets: snapshot.trackedWallets,
+      windowHours: config.worker.smartMoneyBuyWindowHours,
+    }
+    return res.json(result)
   } catch (err) {
     console.warn('ClickHouse smart money query failed:', err)
     return res.json({ ...empty, message: 'Smart money data is temporarily unavailable.' })

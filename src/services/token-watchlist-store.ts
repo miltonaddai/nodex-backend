@@ -237,8 +237,9 @@ export async function addWatchlistToken(
 
   if (error) throw error
 
-  const [token] = await enrich([emptyMetrics(data as TokenWatchlistRow)], input.chain)
-  return token
+  // No enrich here: it can wait on an idle ClickHouse waking up plus Dexscreener and Helius,
+  // which made adding feel stuck. The watchlist page loads live metrics when it lists tokens.
+  return emptyMetrics(data as TokenWatchlistRow)
 }
 
 export async function removeWatchlistToken(
