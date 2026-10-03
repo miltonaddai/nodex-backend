@@ -7,6 +7,7 @@ import { syncAllWallets } from './sync-wallets'
 import { refreshAllTokenMarketHealth } from './sync-market-health'
 import { syncAllInsiderPlays } from './sync-insiders'
 import { syncAllSmartMoneyBuys } from './sync-smart-money'
+import { syncTokenSightings } from './sync-sightings'
 
 let pipelineTimer: NodeJS.Timeout | null = null
 let healthTimer: NodeJS.Timeout | null = null
@@ -88,6 +89,11 @@ async function runPipeline(): Promise<boolean> {
     // Runs last and on its own candidate list: the churn screen above rejects bundled launches,
     // which are exactly the tokens this step exists to catch.
     await syncAllInsiderPlays()
+    // Last, so it sees every market cap this run wrote. Reads ClickHouse only, no API calls.
+    // Isolated so a failure here never fails the run that produced the data.
+    await syncTokenSightings(new Date(startedAt)).catch((error) =>
+      console.error('[worker] Token sightings update failed:', error)
+    )
     // refreshTokenScores and syncAllHolderWealth are intentionally not run here.
     //
     // Both write token_analytics rows keyed by (chain, contract, period_days). Because the table

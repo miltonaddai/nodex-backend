@@ -26,6 +26,12 @@ test('sorts strings and timestamps', () => {
   assert.deepEqual(sortRows(rows, [{ key: 'launchedAt', order: 'desc' }]).map((r) => r.name), ['c', 'b', 'a'])
 })
 
+test('missing values sort last in both directions', () => {
+  const withGaps = [{ id: 'a', x: 2 as number | null }, { id: 'b', x: null }, { id: 'c', x: 5 }]
+  assert.deepEqual(sortRows(withGaps, [{ key: 'x', order: 'desc' }]).map((r) => r.id), ['c', 'a', 'b'])
+  assert.deepEqual(sortRows(withGaps, [{ key: 'x', order: 'asc' }]).map((r) => r.id), ['a', 'c', 'b'])
+})
+
 test('does not mutate the input', () => {
   const before = rows.map((r) => r.name)
   sortRows(rows, [{ key: 'name', order: 'desc' }])

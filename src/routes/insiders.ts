@@ -6,6 +6,7 @@ import { config } from '../config'
 import { authMiddleware } from '../middleware/auth'
 import { subscriptionMiddleware } from '../middleware/subscription'
 import { getPipelineSchedule, isClickhouseConfigured, queryClickhouse } from '../services/clickhouse'
+import { withSightings } from '../services/token-sightings'
 
 const router = Router()
 
@@ -16,6 +17,8 @@ const INSIDER_SORT_MAP = {
   insiderAcquired: 'insider_acquired_pct',
   marketCap: 'market_cap',
   launchedAt: 'launched_at',
+  firstSeenAt: 'first_seen_at',
+  peakMultiple: 'peak_multiple',
 } as const
 
 /**
@@ -37,6 +40,8 @@ const INSIDER_SORT_FIELDS = {
   insider_acquired_pct: 'insiderAcquiredPct',
   market_cap: 'marketCap',
   launched_at: 'launchedAt',
+  first_seen_at: 'firstSeenAt',
+  peak_multiple: 'peakMultiple',
 } as const
 
 const STATUSES = new Set(['holding', 'distributing', 'exited'])
@@ -108,7 +113,7 @@ function mapInsiderRow(row: InsiderRow, rank: number) {
   }
 }
 
-type InsiderItem = ReturnType<typeof mapInsiderRow>
+type InsiderItem = ReturnType<typeof mapInsiderRow> & import('../services/token-sightings').SightingFields
 
 /** Tokens whose launch was bought by wallets under common control, strongest first. */
 router.get('/', authMiddleware, subscriptionMiddleware, async (req: Request, res: Response) => {
@@ -127,7 +132,7 @@ router.get('/', authMiddleware, subscriptionMiddleware, async (req: Request, res
 
   // Every listed play is cached once (under a hundred tokens) and filtered, sorted and paged in
   // memory, so changing the sort, page or filters never waits on ClickHouse.
-  const cacheKey = `v5:insiders:snapshot:${chain}`
+  const cacheKey = `v6:insiders:snapshot:${chain}`
   try {
     const snapshot = await getSnapshot(cacheKey, async () => {
       const [rows, schedule] = await Promise.all([
@@ -150,7 +155,7 @@ router.get('/', authMiddleware, subscriptionMiddleware, async (req: Request, res
         null
       )
       const value = {
-        items: rows.map((row) => mapInsiderRow(row, 0)),
+        items: await withSightings(chain, rows.map((row) => mapInsiderRow(row, 0))),
         lastUpdated: lastUpdated ? `${lastUpdated.replace(' ', 'T')}Z` : null,
         nextUpdate: schedule?.nextUpdate ?? null,
       }

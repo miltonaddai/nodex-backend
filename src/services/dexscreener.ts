@@ -12,6 +12,7 @@ export interface DexPair {
   pairAddress?: string
   url?: string
   baseToken?: DexToken
+  quoteToken?: DexToken
   priceUsd?: string
   fdv?: number
   marketCap?: number
@@ -70,6 +71,36 @@ async function fetchBatch(addresses: string[], chain = 'solana'): Promise<DexPai
   return []
 }
 
+/**
+ * Quote assets a pool must be paired with to be trusted for price, liquidity and volume. Anyone
+ * can open a pool against a token they minted themselves and report any liquidity they like, so
+ * picking the deepest pool outright let spoofed pools set the price: one token showed a $7.2B
+ * market cap and another $72M when their real pools valued them at $438K and $4K.
+ */
+const TRUSTED_QUOTES: Record<string, Set<string>> = {
+  solana: new Set(
+    [
+      'So11111111111111111111111111111111111111112', // SOL
+      'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+      'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+      'USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB', // USD1
+      'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', // BONK, the quote for letsbonk launches
+    ].map((address) => address.toLowerCase())
+  ),
+  robinhood: new Set(
+    [
+      '0x0000000000000000000000000000000000000000', // native ETH
+      '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73', // WETH
+      '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', // USDG
+    ].map((address) => address.toLowerCase())
+  ),
+}
+
+function isTrustedQuote(pair: DexPair, chain: string): boolean {
+  const quote = pair.quoteToken?.address?.toLowerCase()
+  return Boolean(quote && TRUSTED_QUOTES[chain]?.has(quote))
+}
+
 export function selectTokenMarketHealth(
   contract: string,
   pairs: DexPair[],
@@ -83,7 +114,11 @@ export function selectTokenMarketHealth(
   )
   if (matches.length === 0) return null
 
-  const primary = [...matches].sort(
+  // Only trusted pools count when the token has any. Otherwise every pool does, as before.
+  const trusted = matches.filter((pair) => isTrustedQuote(pair, chain))
+  const pools = trusted.length > 0 ? trusted : matches
+
+  const primary = [...pools].sort(
     (left, right) => number(right.liquidity?.usd) - number(left.liquidity?.usd)
   )[0]
   return {
@@ -94,8 +129,8 @@ export function selectTokenMarketHealth(
     price: number(primary.priceUsd),
     marketCap: number(primary.marketCap),
     fdv: number(primary.fdv),
-    liquidity: matches.reduce((sum, pair) => sum + number(pair.liquidity?.usd), 0),
-    volume24h: matches.reduce((sum, pair) => sum + number(pair.volume?.h24), 0),
+    liquidity: pools.reduce((sum, pair) => sum + number(pair.liquidity?.usd), 0),
+    volume24h: pools.reduce((sum, pair) => sum + number(pair.volume?.h24), 0),
     priceChange24h: number(primary.priceChange?.h24),
   }
 }

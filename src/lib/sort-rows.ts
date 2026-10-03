@@ -14,10 +14,14 @@ function compare(a: unknown, b: unknown): number {
   return String(a ?? '').localeCompare(String(b ?? ''))
 }
 
-/** Sorts a copy by the keys in order, later keys breaking ties. */
+const missing = (value: unknown) => value === null || value === undefined
+
+/** Sorts a copy by the keys in order, later keys breaking ties. Missing values sort last either way. */
 export function sortRows<T>(rows: readonly T[], keys: SortKey<T>[]): T[] {
   return [...rows].sort((a, b) => {
     for (const { key, order } of keys) {
+      if (missing(a[key]) !== missing(b[key])) return missing(a[key]) ? 1 : -1
+      if (missing(a[key])) continue
       const diff = compare(a[key], b[key])
       if (diff !== 0) return order === 'asc' ? diff : -diff
     }

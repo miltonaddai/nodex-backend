@@ -13,6 +13,7 @@ import {
   queryClickhousePaginated,
 } from '../services/clickhouse'
 import { isDemoMode } from '../services/demo-auth'
+import { withSightings } from '../services/token-sightings'
 
 const router = Router()
 
@@ -30,12 +31,15 @@ const TOKEN_SORT_MAP = {
   liquidity: 'liquidity',
   launchedAt: 'launched_at',
   name: 'name',
+  // Not ClickHouse columns: these come from token_sightings and are only sorted in memory.
+  firstSeenAt: 'first_seen_at',
+  peakMultiple: 'peak_multiple',
 } as const
 
 /** Upper bound on one chain and period's snapshot. Real snapshots hold a few hundred tokens. */
 const SNAPSHOT_MAX_ROWS = 5000
 
-type TokenItem = ReturnType<typeof mapTokenRow>
+type TokenItem = ReturnType<typeof mapTokenRow> & import('../services/token-sightings').SightingFields
 
 /** The row field a sort column reads, e.g. market_cap -> marketCap. */
 function tokenSortField(column: string): keyof TokenItem {
@@ -164,7 +168,7 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
   const periodDays = isValidPeriod(period) ? periodToDays(period) : PERIOD_CONFIG['7D'].days
   // One cached snapshot per chain and period. Sorting, filtering and paging happen in memory, so
   // a new sort or page never waits on ClickHouse.
-  const cacheKey = `v8:tokens:snapshot:${chain}:${periodDays}`
+  const cacheKey = `v9:tokens:snapshot:${chain}:${periodDays}`
 
   if (isClickhouseConfigured()) {
     try {
@@ -185,7 +189,7 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
           getPipelineSchedule().catch(() => null),
         ])
         const value = {
-          items: rows.map((row) => mapTokenRow(row, 0)),
+          items: await withSightings(chain, rows.map((row) => mapTokenRow(row, 0))),
           lastUpdated,
           nextUpdate: schedule?.nextUpdate ?? null,
         }

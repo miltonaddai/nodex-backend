@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express'
 import { config } from '../config'
 import { PaginatedResult, parsePagination, parseSortOrder, pickSortColumn } from '../lib/pagination'
 import { getSnapshot, snapshotFreshUntil } from '../lib/snapshot-cache'
+import { withSightings } from '../services/token-sightings'
 import { pageRows, sortRows, type SortKey } from '../lib/sort-rows'
 import { authMiddleware } from '../middleware/auth'
 import { subscriptionMiddleware } from '../middleware/subscription'
@@ -19,6 +20,8 @@ const BUY_SORT_MAP = {
   lastBuyAt: 'last_buy_at',
   priceChange24h: 'price_change_24h',
   buyerProfit: 'buyer_realized_pnl_30d',
+  firstSeenAt: 'first_seen_at',
+  peakMultiple: 'peak_multiple',
 } as const
 
 /** The mapped field each sort column reads. */
@@ -29,6 +32,8 @@ const BUY_SORT_FIELDS = {
   last_buy_at: 'lastBuyAt',
   price_change_24h: 'priceChange24h',
   buyer_realized_pnl_30d: 'buyerRealizedPnl30d',
+  first_seen_at: 'firstSeenAt',
+  peak_multiple: 'peakMultiple',
 } as const
 
 interface BuyRow {
@@ -129,7 +134,7 @@ function mapBuy(row: BuyRow, rank: number, walletsByAddress: Map<string, Tracked
   }
 }
 
-type BuyItem = ReturnType<typeof mapBuy>
+type BuyItem = ReturnType<typeof mapBuy> & import('../services/token-sightings').SightingFields
 
 interface BuysResult extends PaginatedResult<BuyItem> {
   trackedWallets: number
@@ -156,7 +161,7 @@ router.get('/buys', authMiddleware, subscriptionMiddleware, async (req: Request,
 
   // The whole latest run is cached once per chain (a couple of hundred tokens) and sorted and
   // paged in memory, so a new sort or page never waits on ClickHouse.
-  const cacheKey = `v4:smart-money:buys:snapshot:${chain}`
+  const cacheKey = `v5:smart-money:buys:snapshot:${chain}`
   try {
     const snapshot = await getSnapshot(cacheKey, async () => {
       const latest = `snapshot_at = (SELECT max(snapshot_at) FROM smart_money_buys WHERE chain = {chain:String})`
@@ -167,7 +172,7 @@ router.get('/buys', authMiddleware, subscriptionMiddleware, async (req: Request,
       ])
       const walletsByAddress = new Map(walletRows.map((row) => [row.wallet, mapWallet(row)]))
       const value = {
-        items: rows.map((row) => mapBuy(row, 0, walletsByAddress)),
+        items: await withSightings(chain, rows.map((row) => mapBuy(row, 0, walletsByAddress))),
         lastUpdated: rows[0]?.snapshot_at ? iso(rows[0].snapshot_at) : null,
         nextUpdate: schedule?.nextUpdate ?? null,
         trackedWallets: walletRows.length,
