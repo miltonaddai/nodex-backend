@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express'
 import { config } from '../config'
 import { PaginatedResult, parsePagination, parseSortOrder, pickSortColumn } from '../lib/pagination'
 import { getSnapshot, snapshotFreshUntil } from '../lib/snapshot-cache'
+import { isEarlySignal } from '../lib/early-signal'
 import { withSightings } from '../services/token-sightings'
 import { pageRows, sortRows, type SortKey } from '../lib/sort-rows'
 import { authMiddleware } from '../middleware/auth'
@@ -136,7 +137,9 @@ function mapBuy(row: BuyRow, rank: number, walletsByAddress: Map<string, Tracked
 
 type BuyItem = ReturnType<typeof mapBuy> & import('../services/token-sightings').SightingFields
 
-interface BuysResult extends PaginatedResult<BuyItem> {
+interface BuysResult extends PaginatedResult<BuyItem & { earlySignal?: boolean }> {
+  /** Tokens meeting the early-signal preset in the whole snapshot, whatever the filters. */
+  earlySignalCount?: number
   trackedWallets: number
   windowHours: number
 }
@@ -147,6 +150,14 @@ router.get('/buys', authMiddleware, subscriptionMiddleware, async (req: Request,
   const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, 20)
   const sortBy = pickSortColumn(req.query.sortBy, BUY_SORT_MAP, 'walletCount')
   const sortOrder = parseSortOrder(req.query.sortOrder)
+  // Optional filters, applied to the cached snapshot. A missing or invalid value means no limit.
+  const positive = (value: unknown) => {
+    const n = Number(value)
+    return Number.isFinite(n) && n > 0 ? n : null
+  }
+  const maxMarketCap = positive(req.query.maxMarketCap)
+  const minWalletCount = positive(req.query.minWalletCount)
+  const earlyOnly = req.query.preset === 'early'
   const empty: BuysResult = {
     items: [],
     page,
@@ -180,6 +191,18 @@ router.get('/buys', authMiddleware, subscriptionMiddleware, async (req: Request,
       return { value, freshUntil: snapshotFreshUntil(schedule) }
     })
     if (!snapshot) return res.json(empty)
+    // A pool holds at most about twice a token's market cap in liquidity (when most supply sits
+    // in it). Far more than that means the market cap figure is wrong, as with bridged tokens
+    // whose supply Dexscreener misreports, so those rows are left out of a market cap filter.
+    const plausibleCap = (item: BuyItem) => item.marketCap > 0 && item.liquidity <= item.marketCap * 3
+    // Flagged at response time so a rule change applies without waiting for a new snapshot.
+    const flagged = snapshot.items.map((item) => ({ ...item, earlySignal: isEarlySignal(item) }))
+    const matching = flagged.filter(
+      (item) =>
+        (!earlyOnly || item.earlySignal) &&
+        (maxMarketCap === null || (plausibleCap(item) && item.marketCap <= maxMarketCap)) &&
+        (minWalletCount === null || item.walletCount >= minWalletCount)
+    )
     // Ties on wallet count go to more profitable buyers, then to larger buys.
     const keys: SortKey<BuyItem>[] = [
       { key: BUY_SORT_FIELDS[sortBy as keyof typeof BUY_SORT_FIELDS] ?? 'walletCount', order: sortOrder },
@@ -188,10 +211,11 @@ router.get('/buys', authMiddleware, subscriptionMiddleware, async (req: Request,
       keys.push({ key: 'buyerRealizedPnl30d', order: sortOrder }, { key: 'netBuyUsd', order: sortOrder })
     }
     const result: BuysResult = {
-      items: pageRows(sortRows(snapshot.items, keys), offset, pageSize),
+      earlySignalCount: flagged.filter((item) => item.earlySignal).length,
+      items: pageRows(sortRows(matching, keys), offset, pageSize),
       page,
       pageSize,
-      total: snapshot.items.length,
+      total: matching.length,
       lastUpdated: snapshot.lastUpdated,
       nextUpdate: snapshot.nextUpdate,
       trackedWallets: snapshot.trackedWallets,
