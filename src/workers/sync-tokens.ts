@@ -3,10 +3,22 @@ import { allPeriodConfigs } from '../lib/periods'
 import { discoverQualityTokens, pickTokenPeriodFields, type DiscoveredToken } from '../services/birdeye'
 import { insertClickhouse } from '../services/clickhouse'
 import { getHolderCounts, isBlockscoutConfigured } from '../services/blockscout'
+import { getTokenQuotes } from '../services/dexscreener'
 import { cacheDeletePattern } from '../services/redis'
 
 /** Chains whose holder counts come from Blockscout because Birdeye has none. */
 const BLOCKSCOUT_HOLDER_CHAINS = new Set(['robinhood'])
+/** Chains where Birdeye has no listing time, so launch time is the token's oldest Dexscreener pool. */
+const DEXSCREENER_LAUNCH_CHAINS = new Set(['bsc'])
+
+async function launchTimesFromPools(chain: string, addresses: string[]): Promise<Map<string, number>> {
+  const quotes = await getTokenQuotes(chain, addresses)
+  const launched = new Map<string, number>()
+  for (const [address, quote] of quotes) {
+    if (quote.firstPoolAt) launched.set(address, Math.floor(quote.firstPoolAt / 1000))
+  }
+  return launched
+}
 
 function formatNow(): string {
   return new Date().toISOString().replace('T', ' ').slice(0, 19)
@@ -50,6 +62,9 @@ export async function syncTokensForChain(chain: string): Promise<void> {
       maxAgeDays: config.worker.discoveryMaxAgeDays,
       pages: config.worker.discoveryPages,
       holderCounts: needsBlockscout ? (addresses) => getHolderCounts(chain, addresses) : undefined,
+      launchTimes: DEXSCREENER_LAUNCH_CHAINS.has(chain)
+        ? (addresses) => launchTimesFromPools(chain, addresses)
+        : undefined,
     })
 
     if (tokens.length === 0) {

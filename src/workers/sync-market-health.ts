@@ -11,7 +11,7 @@ function formatNow(): string {
 }
 
 /** Chains with Dexscreener coverage and a discovery step feeding token_launches. */
-const MARKET_HEALTH_CHAINS = new Set(['solana', 'robinhood'])
+const MARKET_HEALTH_CHAINS = new Set(['solana', 'robinhood', 'bsc'])
 
 export async function refreshTokenMarketHealth(chain: string): Promise<void> {
   if (!MARKET_HEALTH_CHAINS.has(chain)) return

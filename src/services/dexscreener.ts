@@ -48,7 +48,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-/** Dexscreener chain slugs match ours: solana, robinhood. */
+/** Dexscreener chain slugs match ours: solana, robinhood, bsc. */
 async function fetchBatch(addresses: string[], chain = 'solana'): Promise<DexPair[]> {
   const path = addresses.map(encodeURIComponent).join(',')
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -92,6 +92,17 @@ const TRUSTED_QUOTES: Record<string, Set<string>> = {
       '0x0000000000000000000000000000000000000000', // native ETH
       '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73', // WETH
       '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', // USDG
+    ].map((address) => address.toLowerCase())
+  ),
+  bsc: new Set(
+    [
+      '0x0000000000000000000000000000000000000000', // native BNB
+      '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', // WBNB
+      '0x55d398326f99059fF775485246999027B3197955', // USDT
+      '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d', // USDC
+      '0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d', // USD1
+      '0xc5f0f7b66764F6ec8C8Dff7BA683102295E16409', // FDUSD
+      '0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56', // BUSD
     ].map((address) => address.toLowerCase())
   ),
 }

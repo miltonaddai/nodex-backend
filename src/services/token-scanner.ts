@@ -1,8 +1,8 @@
 import { fomoTraderList, walletForChain } from '../lib/fomo-traders'
 import { insiderStatus, type LaunchInsiderReport } from '../lib/insider-detection'
 import { assessRisk, type RiskReport, type ScanFacts } from '../lib/token-risk'
-import { getRobinhoodEthBalances } from './alchemy'
-import { getTokenStats, getWalletNetWorthUsd } from './birdeye'
+import { getEvmNativeBalances } from './alchemy'
+import { getEvmTokenSecurity, getTokenStats, getWalletNetWorthUsd, type EvmTokenSecurity } from './birdeye'
 import { getEvmTokenHolders, isContractVerified } from './blockscout'
 import { queryClickhouse } from './clickhouse'
 import { getTokenPairs, type DexPair } from './dexscreener'
@@ -16,9 +16,13 @@ import { analyzeLaunch } from '../workers/sync-insiders'
  * reads the token's first transactions and funders, costs 40-60 Helius calls and takes up to a
  * minute, so it is a separate call. Solana only: its strongest signal, several wallets signing
  * one buy, has no equivalent on EVM chains.
+ *
+ * BNB Chain has no holder list (Blockscout does not cover it and Birdeye's holder endpoint does
+ * not support it), so its scan reads Birdeye's contract audit instead: holder count, mint, tax
+ * and honeypot checks.
  */
 
-export type ScanChain = 'solana' | 'robinhood'
+export type ScanChain = 'solana' | 'robinhood' | 'bsc'
 
 export interface ScanHolder {
   rank: number
@@ -72,6 +76,8 @@ export interface ScanResult {
     transferFeeAuthority: string | null
     permanentDelegate: string | null
     contractVerified: boolean | null
+    /** EVM contract audit (BNB Chain): the token cannot be sold. Null where not checked. */
+    honeypot: boolean | null
   }
   holders: {
     count: number | null
@@ -127,7 +133,9 @@ function linksFor(chain: ScanChain, address: string, pair: DexPair | undefined, 
   links.push(
     chain === 'solana'
       ? { label: 'Solscan', url: `https://solscan.io/token/${address}` }
-      : { label: 'Blockscout', url: `https://robinhoodchain.blockscout.com/token/${address}` }
+      : chain === 'bsc'
+        ? { label: 'BscScan', url: `https://bscscan.com/token/${address}` }
+        : { label: 'Blockscout', url: `https://robinhoodchain.blockscout.com/token/${address}` }
   )
   const seen = new Set(links.map((l) => l.url))
   const push = (label: string, url?: string) => {
@@ -195,6 +203,8 @@ async function storedBundle(address: string): Promise<ScanBundle | null> {
 }
 
 function factsFor(result: Omit<ScanResult, 'risk'>): ScanFacts {
+  // Solana reads the mint account; BNB Chain reads Birdeye's contract audit. Robinhood Chain has neither.
+  const checked = result.chain === 'solana' || result.chain === 'bsc'
   const solana = result.chain === 'solana'
   const { security } = result
   return {
@@ -202,10 +212,11 @@ function factsFor(result: Omit<ScanResult, 'risk'>): ScanFacts {
     marketCapUsd: result.marketCapUsd,
     ageHours: result.ageHours,
     // Mint settings are only read on Solana. On EVM chains they stay unknown.
-    mintAuthorityActive: solana ? Boolean(security.mintAuthority) : null,
+    mintAuthorityActive: checked ? Boolean(security.mintAuthority) : null,
     freezeAuthorityActive: solana ? Boolean(security.freezeAuthority) : null,
     transferFeeBps: security.transferFeeBps,
-    transferFeeChangeable: solana ? Boolean(security.transferFeeAuthority) : null,
+    transferFeeChangeable: checked ? Boolean(security.transferFeeAuthority) : null,
+    honeypot: security.honeypot,
     permanentDelegate: solana ? Boolean(security.permanentDelegate) : null,
     contractVerified: result.security.contractVerified,
     holders: result.holders.count,
@@ -240,6 +251,7 @@ export async function scanToken(chain: ScanChain, address: string): Promise<Scan
   const insiderSet = new Set((bundle?.insiderWallets ?? []).map((w) => w.toLowerCase()))
 
   let security: MintSecurity | null = null
+  let evmAudit: EvmTokenSecurity | null = null
   let contractVerified: boolean | null = null
   let supply = 0
   let holderCount: number | null = stats?.holders ?? null
@@ -260,6 +272,11 @@ export async function scanToken(chain: ScanChain, address: string): Promise<Scan
         nativeBalance: isPool ? null : h.solBalance,
       }
     })
+  } else if (chain === 'bsc') {
+    evmAudit = await getEvmTokenSecurity(address, chain).catch(() => null)
+    contractVerified = evmAudit?.openSource ?? null
+    // The overview's count is the one discovery's churn screen uses; the audit's runs lower.
+    holderCount = holderCount ?? evmAudit?.holderCount ?? null
   } else {
     const [evm, verified] = await Promise.all([getEvmTokenHolders(chain, address), isContractVerified(chain, address).catch(() => null)])
     contractVerified = verified
@@ -274,7 +291,7 @@ export async function scanToken(chain: ScanChain, address: string): Promise<Scan
     }))
   }
 
-  // Balances for the largest real wallets: portfolio value on Solana, ETH on Robinhood Chain.
+  // Balances for the largest real wallets: portfolio value on Solana, the native coin on EVM chains.
   const wallets = rawHolders.filter((h) => !h.isPool).slice(0, BALANCE_LOOKUPS)
   const netWorth = new Map<string, number | null>()
   if (chain === 'solana') {
@@ -282,7 +299,7 @@ export async function scanToken(chain: ScanChain, address: string): Promise<Scan
       netWorth.set(holder.address, await getWalletNetWorthUsd(holder.address).catch(() => null))
     }
   } else {
-    const balances = await getRobinhoodEthBalances(wallets.map((h) => h.address)).catch(() => new Map<string, number>())
+    const balances = await getEvmNativeBalances(chain, wallets.map((h) => h.address)).catch(() => new Map<string, number>())
     for (const holder of wallets) holder.nativeBalance = balances.get(holder.address) ?? null
   }
 
@@ -318,14 +335,25 @@ export async function scanToken(chain: ScanChain, address: string): Promise<Scan
     poolCount: pairs.length,
     primaryDex: primary?.dexId ?? null,
     links: linksFor(chain, address, primary, stats?.socials ?? {}),
-    security: {
-      mintAuthority: security?.mintAuthority ?? null,
-      freezeAuthority: security?.freezeAuthority ?? null,
-      transferFeeBps: security ? security.transferFeeBps : null,
-      transferFeeAuthority: security?.transferFeeAuthority ?? null,
-      permanentDelegate: security?.permanentDelegate ?? null,
-      contractVerified,
-    },
+    security: evmAudit
+      ? {
+          mintAuthority: evmAudit.mintable ? evmAudit.owner ?? 'unknown' : null,
+          freezeAuthority: null,
+          transferFeeBps: evmAudit.taxBps,
+          transferFeeAuthority: evmAudit.taxChangeable ? evmAudit.owner ?? 'unknown' : null,
+          permanentDelegate: null,
+          contractVerified,
+          honeypot: evmAudit.honeypot,
+        }
+      : {
+          mintAuthority: security?.mintAuthority ?? null,
+          freezeAuthority: security?.freezeAuthority ?? null,
+          transferFeeBps: security ? security.transferFeeBps : null,
+          transferFeeAuthority: security?.transferFeeAuthority ?? null,
+          permanentDelegate: security?.permanentDelegate ?? null,
+          contractVerified,
+          honeypot: null,
+        },
     holders: {
       count: holderCount,
       top10Pct,

@@ -14,9 +14,17 @@ import { cacheDeletePattern } from '../services/redis'
  * The wallets come from FOMO's leaderboards, saved monthly to src/data/fomo-top-traders.json.
  * They belong to named traders, so none of the Birdeye-era filtering for deployers, clone farms
  * and bots is needed. What they are buying is refreshed every run, for Solana (their Solana
- * wallets) and Robinhood Chain (their EVM wallets).
+ * wallets), Robinhood Chain and BNB Chain (their EVM wallets).
  */
-export const SMART_MONEY_CHAINS = new Set(['solana', 'robinhood'])
+export const SMART_MONEY_CHAINS = new Set(['solana', 'robinhood', 'bsc'])
+
+/**
+ * Chains read from FOMO's trade feed instead of per-wallet swap history. Robinhood Chain trades go
+ * through FOMO's relayer, so wallet history misses them. On BNB Chain the feed costs 250 credits a
+ * run, where per-wallet Birdeye reads would cost one call per tracked wallet with no cheap
+ * "anything new?" check to skip idle ones.
+ */
+const FEED_CHAINS = new Set(['robinhood', 'bsc'])
 
 interface TrackedWallet {
   wallet: string
@@ -92,7 +100,8 @@ interface StoredSwap {
 }
 
 /** Placeholder quote side for feed trades: FOMO reports the USD value, not what was paid with. */
-const FEED_QUOTE = { address: '0x0000000000000000000000000000000000000000', symbol: 'ETH' }
+const FEED_QUOTE = { address: '0x0000000000000000000000000000000000000000' }
+const FEED_QUOTE_SYMBOL: Record<string, string> = { robinhood: 'ETH', bsc: 'BNB' }
 
 /**
  * The feed returns the newest events first and holds roughly the latest 200 per filter (about
@@ -101,10 +110,10 @@ const FEED_QUOTE = { address: '0x0000000000000000000000000000000000000000', symb
 const FEED_PAGE = 200
 
 /**
- * Stores tracked traders' Robinhood Chain trades from FOMO's feed. FOMO submits these trades
- * through a relayer, so the trader's wallet never sends the swap and Birdeye's per-wallet swap
- * history shows almost nothing (1 of 212 wallets had a swap in 72 hours). The feed reports each
- * trade by trader, with its USD value. One buy and one sell call per run, 250 credits.
+ * Stores tracked traders' trades from FOMO's feed. On Robinhood Chain FOMO submits trades through
+ * a relayer, so the trader's wallet never sends the swap and Birdeye's per-wallet swap history
+ * shows almost nothing (1 of 212 wallets had a swap in 72 hours). The feed reports each trade by
+ * trader, with its USD value. One buy and one sell call per run, 250 credits.
  */
 async function fetchFeedSwaps(
   chain: string,
@@ -151,7 +160,7 @@ async function fetchFeedSwaps(
         base_symbol: alert.token ?? '',
         base_change: sign,
         quote_address: FEED_QUOTE.address,
-        quote_symbol: FEED_QUOTE.symbol,
+        quote_symbol: FEED_QUOTE_SYMBOL[chain] ?? 'ETH',
         quote_change: -sign,
         fetched_at: fetchedAt,
       })
@@ -264,8 +273,8 @@ async function loadWalletFlows(
 
 export async function syncSmartMoneyBuys(chain: string): Promise<void> {
   if (!SMART_MONEY_CHAINS.has(chain)) return
-  if (chain === 'robinhood' && !config.fomo.apiKey) {
-    console.warn('[smart-money robinhood] FOMO_API_KEY not set, skipping Robinhood Chain')
+  if (FEED_CHAINS.has(chain) && !config.fomo.apiKey) {
+    console.warn(`[smart-money ${chain}] FOMO_API_KEY not set, skipping ${chain}`)
     return
   }
   if (!config.birdeye.apiKey) {
@@ -287,9 +296,9 @@ export async function syncSmartMoneyBuys(chain: string): Promise<void> {
 
   const now = Math.floor(Date.now() / 1000)
   const windowStart = now - config.worker.smartMoneyBuyWindowHours * 3600
-  // Robinhood Chain trades go through FOMO's relayer, so they come from FOMO's feed instead.
+  // Feed chains read FOMO's trade feed instead of each wallet's swap history (see FEED_CHAINS).
   const { fetched, skipped, stored } =
-    chain === 'robinhood'
+    FEED_CHAINS.has(chain)
       ? await fetchFeedSwaps(chain, wallets, windowStart)
       : await fetchNewSwaps(chain, wallets, windowStart)
   const walletFlows = await loadWalletFlows(chain, wallets, windowStart)

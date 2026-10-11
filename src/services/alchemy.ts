@@ -61,18 +61,30 @@ export async function getWalletBalance(address: string, chain: string): Promise<
   if (chain === 'robinhood') {
     return getRobinhoodWalletBalance(address)
   }
+  if (chain === 'bsc') {
+    const balances = await getEvmNativeBalances('bsc', [address])
+    return balances.get(address) ?? null
+  }
   return null
 }
 
+/** JSON-RPC endpoint for native balances on each EVM chain. */
+function evmRpcUrl(chain: string): string {
+  if (chain === 'robinhood') return config.alchemy.robinhoodUrl
+  if (chain === 'bsc') return config.bsc.rpcUrl
+  return ''
+}
+
 /**
- * ETH balances for up to 20 Robinhood Chain addresses in one batched request. Blockscout serves
- * the same number but takes several seconds per address.
+ * Native coin balances (ETH on Robinhood Chain, BNB on BNB Chain) for up to 20 addresses in one
+ * batched request. Blockscout serves the same number but takes several seconds per address.
  */
-export async function getRobinhoodEthBalances(addresses: string[]): Promise<Map<string, number>> {
+export async function getEvmNativeBalances(chain: string, addresses: string[]): Promise<Map<string, number>> {
   const result = new Map<string, number>()
-  if (!config.alchemy.robinhoodUrl || addresses.length === 0) return result
+  const url = evmRpcUrl(chain)
+  if (!url || addresses.length === 0) return result
   const batch = addresses.slice(0, 20)
-  const res = await fetch(config.alchemy.robinhoodUrl, {
+  const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(batch.map((address, id) => ({ jsonrpc: '2.0', id, method: 'eth_getBalance', params: [address, 'latest'] }))),

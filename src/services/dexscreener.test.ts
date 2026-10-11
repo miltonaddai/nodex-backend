@@ -116,3 +116,30 @@ test('trusts Robinhood Chain pools quoted in WETH', () => {
   )
   assert.equal(health?.pairAddress, 'weth')
 })
+
+test('trusts BNB Chain pools quoted in WBNB over a deeper spoofed pool', () => {
+  const contract = '0xabc0000000000000000000000000000000000002'
+  const health = selectTokenMarketHealth(
+    contract,
+    [
+      {
+        chainId: 'bsc',
+        pairAddress: 'fake',
+        baseToken: { address: contract },
+        quoteToken: { address: '0x9999999999999999999999999999999999999999' },
+        marketCap: 90_000_000,
+        liquidity: { usd: 80_000_000 },
+      },
+      {
+        chainId: 'bsc',
+        pairAddress: 'wbnb',
+        baseToken: { address: contract },
+        quoteToken: { address: '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c' },
+        marketCap: 1_200_000,
+        liquidity: { usd: 150_000 },
+      },
+    ],
+    'bsc'
+  )
+  assert.equal(health?.pairAddress, 'wbnb')
+})

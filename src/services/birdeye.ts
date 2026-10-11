@@ -72,7 +72,7 @@ export interface TokenTopTrader {
 
 /** Birdeye's x-chain value. Chains it knows by our own name pass through. */
 function birdeyeChain(chain: string): string {
-  return chain === 'solana' || chain === 'robinhood' ? chain : 'ethereum'
+  return chain === 'solana' || chain === 'robinhood' || chain === 'bsc' ? chain : 'ethereum'
 }
 
 async function birdeyeFetch(path: string, chain = 'solana', retries = 1): Promise<unknown | null> {
@@ -305,6 +305,12 @@ export interface DiscoveryOptions {
    * request filter is skipped and holders are fetched for tokens that pass the cheap filters.
    */
   holderCounts?: (addresses: string[]) => Promise<Map<string, number>>
+  /**
+   * Launch times (unix seconds) for chains where Birdeye has no recent_listing_time (BNB Chain),
+   * where filtering on it returns nothing. When set, FDV is filtered server-side in its place
+   * and the age window is applied to tokens that pass the cheap filters.
+   */
+  launchTimes?: (addresses: string[]) => Promise<Map<string, number>>
 }
 
 async function getTokenImageUrls(addresses: string[], chain: string): Promise<Map<string, string>> {
@@ -369,11 +375,17 @@ export async function discoverQualityTokens(
         sort_type: 'desc',
         limit: '100',
         offset: String(page * 100),
-        min_recent_listing_time: String(now - opts.maxAgeDays * 86_400),
-        max_recent_listing_time: String(now - opts.minAgeHours * 3600),
         min_liquidity: String(opts.minLiquidity),
         min_trade_24h_count: String(opts.minTrades24h),
       })
+      if (opts.launchTimes) {
+        // Without the listing window, the most-traded slice is majors and stablecoins.
+        params.set('min_fdv', String(opts.minFdv))
+        params.set('max_fdv', String(opts.maxFdv))
+      } else {
+        params.set('min_recent_listing_time', String(now - opts.maxAgeDays * 86_400))
+        params.set('max_recent_listing_time', String(now - opts.minAgeHours * 3600))
+      }
       // Birdeye has no holder counts on some chains, and filtering on one there returns nothing.
       if (!opts.holderCounts) params.set('min_holder', String(opts.minHolders))
 
@@ -405,6 +417,14 @@ export async function discoverQualityTokens(
         const holder = holders.get(t.address) ?? 0
         return { ...t, holders: holder, churn: holder > 0 ? t.uniqueWallet24h / holder : 0 }
       })
+  }
+  if (opts.launchTimes) {
+    const launched = await opts.launchTimes(candidates.map((t) => t.address))
+    const oldest = now - opts.maxAgeDays * 86_400
+    const newest = now - opts.minAgeHours * 3600
+    candidates = candidates
+      .map((t) => ({ ...t, listedAt: launched.get(t.address) ?? 0 }))
+      .filter((t) => t.listedAt >= oldest && t.listedAt <= newest)
   }
   const qualified = candidates
     .filter((t) => t.churn >= opts.minChurn && t.churn <= opts.maxChurn)
@@ -698,5 +718,48 @@ export async function getTokenStats(address: string, chain: string): Promise<Tok
     buys24h: optional(data.buy24h),
     sells24h: optional(data.sell24h),
     socials,
+  }
+}
+
+export interface EvmTokenSecurity {
+  holderCount: number | null
+  /** Source code published on the block explorer. */
+  openSource: boolean | null
+  /** Someone can still mint supply. */
+  mintable: boolean | null
+  honeypot: boolean | null
+  /** The larger of the buy and sell tax, in basis points. */
+  taxBps: number | null
+  /** The owner can change tax or slippage settings. */
+  taxChangeable: boolean | null
+  /** Who can mint: the owner when ownership is held, otherwise the creator. */
+  owner: string | null
+}
+
+/**
+ * Contract checks for an EVM token from Birdeye's token security endpoint (a GoPlus-style audit).
+ * Covers BNB Chain, where neither Birdeye's holder list nor Blockscout is available.
+ */
+export async function getEvmTokenSecurity(address: string, chain: string): Promise<EvmTokenSecurity | null> {
+  const json = (await birdeyeFetch(`/defi/token_security?address=${encodeURIComponent(address)}`, birdeyeChain(chain))) as {
+    data?: Record<string, unknown>
+  } | null
+  const data = json?.data
+  if (!data) return null
+  const flag = (value: unknown) => (value === '1' || value === 1 ? true : value === '0' || value === 0 ? false : null)
+  const rate = (value: unknown) => (value === '' || value === null || value === undefined ? null : num(value))
+  const taxes = [rate(data.buyTax), rate(data.sellTax)].filter((t): t is number => t !== null)
+  const zero = '0x0000000000000000000000000000000000000000'
+  const owner = str(data.ownerAddress)
+  const holders = num(data.holderCount)
+  const taxSwitches = [flag(data.slippageModifiable), flag(data.personalSlippageModifiable)]
+  return {
+    holderCount: holders > 0 ? holders : null,
+    openSource: flag(data.isOpenSource),
+    mintable: flag(data.isMintable),
+    honeypot: flag(data.isHoneypot),
+    taxBps: taxes.length ? Math.round(Math.max(...taxes) * 10_000) : null,
+    taxChangeable: taxSwitches.includes(true) ? true : taxSwitches.includes(false) ? false : null,
+    owner: owner && owner !== zero ? owner : str(data.creatorAddress) || null,
   }
 }

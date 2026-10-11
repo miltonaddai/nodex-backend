@@ -72,3 +72,9 @@ test('a transfer fee that can still be raised is flagged high', () => {
   assert.ok(report.flags.some((f) => f.title === '1% transfer fee' && f.severity === 'medium'))
   assert.ok(report.flags.some((f) => f.title === 'Transfer fee can be raised' && f.severity === 'high'))
 })
+
+test('a honeypot is a critical risk and means avoid', () => {
+  const report = assessRisk({ ...clean, honeypot: true })
+  assert.equal(report.verdict, 'avoid')
+  assert.ok(report.flags.some((flag) => flag.severity === 'critical' && flag.title === 'Honeypot'))
+})

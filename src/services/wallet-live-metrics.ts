@@ -1,5 +1,5 @@
 import { fomoTraderList } from '../lib/fomo-traders'
-import { getRobinhoodEthBalances } from './alchemy'
+import { getEvmNativeBalances } from './alchemy'
 import { getWalletPnlSummary, getWalletPortfolio } from './birdeye'
 import { getTokenQuotes } from './dexscreener'
 import { getLastActivityTime } from './helius'
@@ -11,8 +11,8 @@ import { cacheGet, cacheSet } from './redis'
  * pipeline had scored, so wallets added from the smart money page showed no data.
  *
  * Solana comes from Birdeye. Birdeye has no net worth for Robinhood Chain and sees no swaps for
- * FOMO wallets there (FOMO submits them through a relayer), so those use the wallet's ETH balance
- * and FOMO's own 7-day PnL, with no win rate.
+ * FOMO wallets there (FOMO submits them through a relayer), so the EVM chains use the wallet's
+ * native balance (ETH or BNB) and FOMO's own 7-day PnL, with no win rate.
  */
 
 export interface LiveWalletMetrics {
@@ -27,7 +27,11 @@ export interface LiveWalletMetrics {
 }
 
 const TTL_SECONDS = 300
-const ROBINHOOD_WETH = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73'
+/** Wrapped native coin per EVM chain, priced on Dexscreener to value the native balance. */
+const WRAPPED_NATIVE: Record<string, string> = {
+  robinhood: '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73', // WETH
+  bsc: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', // WBNB
+}
 
 function formatLastActive(unixSeconds: number | null): string | null {
   if (!unixSeconds) return null
@@ -79,15 +83,16 @@ export async function getLiveWalletMetrics(chain: string, addresses: string[]): 
   }
   if (missing.length === 0) return result
 
-  let ethBalances = new Map<string, number>()
-  let ethPrice = 0
-  if (chain === 'robinhood') {
+  let nativeBalances = new Map<string, number>()
+  let nativePrice = 0
+  const wrapped = WRAPPED_NATIVE[chain]
+  if (wrapped) {
     const [balances, quotes] = await Promise.all([
-      getRobinhoodEthBalances(missing).catch(() => new Map<string, number>()),
-      getTokenQuotes('robinhood', [ROBINHOOD_WETH]).catch(() => new Map()),
+      getEvmNativeBalances(chain, missing).catch(() => new Map<string, number>()),
+      getTokenQuotes(chain, [wrapped]).catch(() => new Map()),
     ])
-    ethBalances = balances
-    ethPrice = quotes.get(ROBINHOOD_WETH)?.price ?? 0
+    nativeBalances = balances
+    nativePrice = quotes.get(wrapped)?.price ?? 0
   }
 
   for (const address of missing) {
@@ -96,7 +101,7 @@ export async function getLiveWalletMetrics(chain: string, addresses: string[]): 
       chain === 'solana'
         ? await solanaMetrics(address)
         : {
-            balance: ethBalances.has(address) && ethPrice > 0 ? ethBalances.get(address)! * ethPrice : null,
+            balance: nativeBalances.has(address) && nativePrice > 0 ? nativeBalances.get(address)! * nativePrice : null,
             pnl7d: trader?.pnl7dUsd ?? null,
             winRate: null,
             lastActive: null,

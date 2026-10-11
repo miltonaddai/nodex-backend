@@ -45,7 +45,7 @@ export function isFomoListStale(now = Date.now()): boolean {
   return fomoListAgeDays(now) > STALE_AFTER_DAYS
 }
 
-/** The wallet each trader uses on a chain. Robinhood Chain is EVM, so it uses the EVM wallet. */
+/** The wallet each trader uses on a chain. Every other chain is EVM, so it uses the EVM wallet. */
 export function walletForChain(trader: FomoTrader, chain: string): string | null {
   return chain === 'solana' ? trader.wallets.solana : trader.wallets.evm
 }

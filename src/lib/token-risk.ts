@@ -43,6 +43,8 @@ export interface ScanFacts {
   permanentDelegate: boolean | null
   /** EVM: source code published on the explorer. */
   contractVerified: boolean | null
+  /** EVM contract audit: buying works but selling does not. Null where not checked. */
+  honeypot?: boolean | null
   holders: number | null
   uniqueWallets24h: number | null
   buys24h: number | null
@@ -85,6 +87,7 @@ export function assessRisk(facts: ScanFacts): RiskReport {
   }
 
   // Contract controls.
+  if (facts.honeypot) add('critical', 'Honeypot', 'The contract audit found that the token cannot be sold once bought.')
   if (facts.mintAuthorityActive) add('critical', 'Mint authority active', 'The creator can mint new tokens and dilute holders at any time.')
   else if (facts.mintAuthorityActive === false) positives.push({ title: 'Mint authority revoked', detail: 'No one can create more supply.' })
   if (facts.freezeAuthorityActive) add('high', 'Freeze authority active', 'The creator can freeze your tokens so they cannot be sold.')

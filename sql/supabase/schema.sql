@@ -12,7 +12,7 @@ create table if not exists public.profiles (
   id uuid primary key references auth.users (id) on delete cascade,
   email text not null,
   display_name text,
-  default_chain text not null default 'solana' check (default_chain in ('solana', 'robinhood')),
+  default_chain text not null default 'solana' check (default_chain in ('solana', 'robinhood', 'bsc')),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -53,7 +53,7 @@ create table if not exists public.watchlist_wallets (
   user_id uuid not null references public.profiles (id) on delete cascade,
   name text not null,
   address text not null,
-  chain text not null default 'solana' check (chain in ('solana', 'robinhood')),
+  chain text not null default 'solana' check (chain in ('solana', 'robinhood', 'bsc')),
   created_at timestamptz not null default now(),
   unique (user_id, address, chain)
 );
@@ -70,7 +70,7 @@ create table if not exists public.watchlist_tokens (
   contract text not null,
   name text not null,
   symbol text not null,
-  chain text not null default 'solana' check (chain in ('solana', 'robinhood')),
+  chain text not null default 'solana' check (chain in ('solana', 'robinhood', 'bsc')),
   created_at timestamptz not null default now(),
   unique (user_id, contract, chain)
 );

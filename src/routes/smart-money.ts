@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { config } from '../config'
+import { coveredChainsText, SUPPORTED_CHAINS } from '../lib/chains'
 import { PaginatedResult, parsePagination, parseSortOrder, pickSortColumn } from '../lib/pagination'
 import { getSnapshot, snapshotFreshUntil } from '../lib/snapshot-cache'
 import { isEarlySignal } from '../lib/early-signal'
@@ -12,7 +13,7 @@ import { getPipelineSchedule, isClickhouseConfigured, queryClickhouse } from '..
 const router = Router()
 
 /** Chains the smart money worker covers. */
-const CHAINS = new Set(['solana', 'robinhood'])
+const CHAINS = new Set<string>(SUPPORTED_CHAINS)
 
 const BUY_SORT_MAP = {
   walletCount: 'wallet_count',
@@ -167,7 +168,7 @@ router.get('/buys', authMiddleware, subscriptionMiddleware, async (req: Request,
     trackedWallets: 0,
     windowHours: config.worker.smartMoneyBuyWindowHours,
   }
-  if (!CHAINS.has(chain)) return res.json({ ...empty, message: 'Smart money tracking covers Solana and Robinhood Chain.' })
+  if (!CHAINS.has(chain)) return res.json({ ...empty, message: `Smart money tracking covers ${coveredChainsText()}.` })
   if (!isClickhouseConfigured()) return res.json(empty)
 
   // The whole latest run is cached once per chain (a couple of hundred tokens) and sorted and

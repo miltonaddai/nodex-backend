@@ -90,7 +90,7 @@ export function getMockTopWallets(chain: string, period: string): WalletRow[] {
   const periodMultiplier = period === '24H' ? 0.35 : period === '30D' ? 1.3 : period === 'All' ? 1.8 : 1
   return SOLANA_WALLETS.map((address, i) => ({
     rank: i + 1,
-    address: chain === 'robinhood' ? `0x${address.slice(0, 40)}` : address,
+    address: chain !== 'solana' ? `0x${address.slice(0, 40)}` : address,
     balance: Math.round(612400 - i * 45000 + Math.random() * 20000),
     totalProfit: Math.round((284500 - i * 22000 + Math.random() * 10000) * periodMultiplier),
     winRate: Math.round(78 - i * 3 + Math.random() * 5),

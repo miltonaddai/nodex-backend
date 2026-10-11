@@ -44,9 +44,25 @@ export const ROBINHOOD_QUOTE_ASSETS = new Set(
   ].map((address) => address.toLowerCase())
 )
 
+/** BNB Chain quote assets, lowercased. */
+export const BSC_QUOTE_ASSETS = new Set(
+  [
+    '0x0000000000000000000000000000000000000000', // BNB (native)
+    '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE', // BNB (aggregator placeholder)
+    '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', // WBNB
+    '0x55d398326f99059fF775485246999027B3197955', // USDT
+    '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d', // USDC
+    '0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d', // USD1
+    '0xc5f0f7b66764F6ec8C8Dff7BA683102295E16409', // FDUSD
+    '0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56', // BUSD
+  ].map((address) => address.toLowerCase())
+)
+
 /** True when an address is a quote asset on the given chain. */
 export function isQuoteAsset(chain: string, address: string): boolean {
-  return chain === 'solana' ? QUOTE_ASSETS.has(address) : ROBINHOOD_QUOTE_ASSETS.has(address.toLowerCase())
+  if (chain === 'solana') return QUOTE_ASSETS.has(address)
+  if (chain === 'bsc') return BSC_QUOTE_ASSETS.has(address.toLowerCase())
+  return ROBINHOOD_QUOTE_ASSETS.has(address.toLowerCase())
 }
 
 export interface SwapSide {

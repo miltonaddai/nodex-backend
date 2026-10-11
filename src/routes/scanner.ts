@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express'
+import { chainLabel, coveredChainsText, EVM_CHAINS } from '../lib/chains'
 import type { LaunchInsiderReport } from '../lib/insider-detection'
 import { isValidSolanaAddress } from '../lib/validation'
 import { authMiddleware } from '../middleware/auth'
@@ -30,12 +31,12 @@ function parseTarget(req: Request): { chain: ScanChain; address: string } | { er
   if (chain === 'solana') {
     return isValidSolanaAddress(address) ? { chain, address } : { error: 'That is not a valid Solana token address.' }
   }
-  if (chain === 'robinhood') {
+  if (EVM_CHAINS.has(chain)) {
     return /^0x[0-9a-fA-F]{40}$/.test(address)
-      ? { chain, address }
-      : { error: 'That is not a valid Robinhood Chain token address (0x followed by 40 hex characters).' }
+      ? { chain: chain as ScanChain, address }
+      : { error: `That is not a valid ${chainLabel(chain)} token address (0x followed by 40 hex characters).` }
   }
-  return { error: 'Scanning covers Solana and Robinhood Chain.' }
+  return { error: `Scanning covers ${coveredChainsText()}.` }
 }
 
 async function cachedScan(chain: ScanChain, address: string): Promise<ScanResult> {

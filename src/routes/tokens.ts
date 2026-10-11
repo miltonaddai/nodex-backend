@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { getMockTopTokens } from '../data/mock'
+import { coveredChainsText, SUPPORTED_CHAINS } from '../lib/chains'
 import { isValidPeriod, periodToDays, PERIOD_CONFIG } from '../lib/periods'
 import { getSnapshot, snapshotFreshUntil } from '../lib/snapshot-cache'
 import { pageRows, sortRows } from '../lib/sort-rows'
@@ -18,7 +19,7 @@ import { withSightings } from '../services/token-sightings'
 const router = Router()
 
 /** Chains with a discovery step writing token_analytics. */
-const TOKEN_CHAINS = new Set(['solana', 'robinhood'])
+const TOKEN_CHAINS = new Set<string>(SUPPORTED_CHAINS)
 
 const TOKEN_SORT_MAP = {
   churn: 'churn',
@@ -161,7 +162,7 @@ router.get('/top', authMiddleware, subscriptionMiddleware, async (req: Request, 
       total: 0,
       lastUpdated: null,
       changeColumnLabel: changeColumnLabel(period),
-      message: 'Live token rankings cover Solana and Robinhood Chain.',
+      message: `Live token rankings cover ${coveredChainsText()}.`,
     })
   }
 

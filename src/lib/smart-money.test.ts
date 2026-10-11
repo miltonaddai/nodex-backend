@@ -98,3 +98,25 @@ test('Robinhood swaps into ETH, WETH or USDG are not buys, whatever the address 
   )
   assert.deepEqual([...flows.keys()], ['0xMEME'])
 })
+
+test('BNB Chain swaps into BNB, WBNB or USDT are not buys, whatever the address casing', () => {
+  const wbnb = '0xBB4CDB9CBD36B01BD1CBAEBF2DE08D9173BC095C'
+  const flows = summarizeWalletFlows(
+    [
+      {
+        blockTime: 1,
+        volumeUsd: 900,
+        base: { address: wbnb, symbol: 'WBNB', uiChangeAmount: 1.4 },
+        quote: { address: '0x55d398326f99059fF775485246999027B3197955', symbol: 'USDT', uiChangeAmount: -900 },
+      },
+      {
+        blockTime: 2,
+        volumeUsd: 400,
+        base: { address: '0xMEME', symbol: 'MEME', uiChangeAmount: 1000 },
+        quote: { address: '0x0000000000000000000000000000000000000000', symbol: 'BNB', uiChangeAmount: -0.6 },
+      },
+    ],
+    'bsc'
+  )
+  assert.deepEqual([...flows.keys()], ['0xMEME'])
+})
