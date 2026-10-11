@@ -16,6 +16,9 @@ const LABELS: Record<SupportedChain, string> = {
   bsc: 'BNB Chain',
 }
 
+/** Watchlist filter value meaning every chain. */
+export const ALL_CHAINS = 'all'
+
 export function isSupportedChain(chain: string): chain is SupportedChain {
   return (SUPPORTED_CHAINS as readonly string[]).includes(chain)
 }

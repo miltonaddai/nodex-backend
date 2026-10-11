@@ -3,7 +3,8 @@ import type { WatchlistWallet } from '../data/mock'
 import { demoSeededChains, demoWatchlist, getMockWatchlist } from '../data/mock'
 import { isDemoMode } from './demo-auth'
 import { isClickhouseConfigured, queryClickhouse } from './clickhouse'
-import { getLiveWalletMetrics } from './wallet-live-metrics'
+import { ALL_CHAINS } from '../lib/chains'
+import { getLiveWalletMetrics, type LiveWalletMetrics } from './wallet-live-metrics'
 
 /** Names saved by older builds of the wallets page, which prefixed every address. */
 const LEGACY_DEFAULT_NAME = /^Top wallet /
@@ -89,7 +90,13 @@ function seedDemoWatchlist(userId: string, chain: string): WatchlistWallet[] {
   return list
 }
 
+/** `chain` is one chain, or 'all' for every chain. */
 export async function listWatchlist(userId: string | undefined, chain: string): Promise<WatchlistWallet[]> {
+  if (chain === ALL_CHAINS && (!userId || isDemoMode())) {
+    const chains = [...new Set((userId ? demoWatchlist.get(userId) ?? [] : []).map((w) => w.chain))]
+    const lists = await Promise.all((chains.length ? chains : ['solana']).map((c) => listWatchlist(userId, c)))
+    return lists.flat()
+  }
   if (!userId || isDemoMode()) {
     if (userId) {
       const filtered = (demoWatchlist.get(userId) ?? []).filter((w) => w.chain === chain)
@@ -105,12 +112,12 @@ export async function listWatchlist(userId: string | undefined, chain: string): 
   const { getSupabaseAdmin } = await import('./supabase')
   const admin = getSupabaseAdmin()
 
-  const { data, error } = await admin
+  let query = admin
     .from('watchlist_wallets')
     .select('id, user_id, name, address, chain, created_at')
     .eq('user_id', userId)
-    .eq('chain', chain)
-    .order('created_at', { ascending: true })
+  if (chain !== ALL_CHAINS) query = query.eq('chain', chain)
+  const { data, error } = await query.order('created_at', { ascending: true })
 
   if (error) throw error
   // Mock wallets belong exclusively to demo mode. Returning them for an empty
@@ -119,10 +126,18 @@ export async function listWatchlist(userId: string | undefined, chain: string): 
   if (!data?.length) return []
 
   const rows = data as WatchlistRow[]
-  const metrics = await getLiveWalletMetrics(chain, rows.map((row) => row.address))
+  // Each chain's metrics load in parallel.
+  const chains = [...new Set(rows.map((row) => row.chain))]
+  const perChain = await Promise.all(
+    chains.map((c) => getLiveWalletMetrics(c, rows.filter((row) => row.chain === c).map((row) => row.address)))
+  )
+  const metrics = new Map<string, LiveWalletMetrics>()
+  chains.forEach((c, index) => {
+    for (const [address, live] of perChain[index]) metrics.set(`${c}:${address}`, live)
+  })
 
   return rows.map((row) => {
-    const live = metrics.get(row.address)
+    const live = metrics.get(`${row.chain}:${row.address}`)
     const measured = Boolean(live && (live.balance !== null || live.pnl7d !== null || live.winRate !== null))
     return {
       id: row.id,

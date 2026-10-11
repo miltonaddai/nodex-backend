@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import { getMockTopTokens } from '../data/mock'
+import { ALL_CHAINS } from '../lib/chains'
 import { isDemoMode } from './demo-auth'
 import { isClickhouseConfigured, queryClickhouse } from './clickhouse'
 import { getTokenQuotes, type TokenQuote } from './dexscreener'
@@ -128,6 +129,19 @@ function applyMockMetrics(token: WatchlistToken): WatchlistToken {
   }
 }
 
+/**
+ * A token's metadata image, kept for a day. Each lookup waits on the shared 750ms Helius
+ * throttle, so re-reading it every time the quotes expire made the list slow to load.
+ */
+async function solanaTokenImage(contract: string): Promise<string> {
+  const key = `watchlist:image:v1:${contract}`
+  const cached = await cacheGet<string>(key)
+  if (cached !== null) return cached
+  const image = (await getTokenImage(contract).catch(() => null)) ?? ''
+  await cacheSet(key, image, 86_400)
+  return image
+}
+
 /** Live quotes are reused briefly so repeat visits do not re-hit Dexscreener. */
 const QUOTE_TTL_SECONDS = 60
 
@@ -141,7 +155,7 @@ async function liveQuotes(contracts: string[], chain: string): Promise<Map<strin
     // Dexscreener has no image for some tokens. On Solana the token's own metadata usually does.
     if (chain === 'solana') {
       for (const [contract, quote] of quotes) {
-        if (!quote.imageUrl) quote.imageUrl = (await getTokenImage(contract).catch(() => null)) ?? ''
+        if (!quote.imageUrl) quote.imageUrl = await solanaTokenImage(contract)
       }
     }
     await cacheSet(key, [...quotes.entries()], QUOTE_TTL_SECONDS)
@@ -181,24 +195,35 @@ async function enrich(tokens: WatchlistToken[], chain: string): Promise<Watchlis
   })
 }
 
+/** Enriches each chain's tokens in parallel and keeps the list's original order. */
+async function enrichByChain(tokens: WatchlistToken[]): Promise<WatchlistToken[]> {
+  const byChain = new Map<string, WatchlistToken[]>()
+  for (const token of tokens) byChain.set(token.chain, [...(byChain.get(token.chain) ?? []), token])
+  const enriched = await Promise.all([...byChain].map(([chain, list]) => enrich(list, chain)))
+  const byId = new Map(enriched.flat().map((token) => [token.id, token]))
+  return tokens.map((token) => byId.get(token.id) ?? token)
+}
+
+/** `chain` is one chain, or 'all' for every chain. */
 export async function listWatchlistTokens(userId: string, chain: string): Promise<WatchlistToken[]> {
+  const all = chain === ALL_CHAINS
   if (isDemoMode()) {
-    const list = (demoTokenWatchlist.get(userId) ?? []).filter((token) => token.chain === chain)
-    return enrich(list, chain)
+    const list = (demoTokenWatchlist.get(userId) ?? []).filter((token) => all || token.chain === chain)
+    return enrichByChain(list)
   }
 
   const { getSupabaseAdmin } = await import('./supabase')
   const admin = getSupabaseAdmin()
 
-  const { data, error } = await admin
+  let query = admin
     .from('watchlist_tokens')
     .select('id, user_id, contract, name, symbol, chain, created_at')
     .eq('user_id', userId)
-    .eq('chain', chain)
-    .order('created_at', { ascending: true })
+  if (!all) query = query.eq('chain', chain)
+  const { data, error } = await query.order('created_at', { ascending: true })
 
   if (error) throw error
-  return enrich((data as TokenWatchlistRow[]).map(emptyMetrics), chain)
+  return enrichByChain((data as TokenWatchlistRow[]).map(emptyMetrics))
 }
 
 export async function addWatchlistToken(

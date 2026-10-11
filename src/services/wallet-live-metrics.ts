@@ -2,7 +2,7 @@ import { fomoTraderList } from '../lib/fomo-traders'
 import { getEvmNativeBalances } from './alchemy'
 import { getWalletPnlSummary, getWalletPortfolio } from './birdeye'
 import { getTokenQuotes } from './dexscreener'
-import { getLastActivityTime } from './helius'
+import { getLastActivityTimes } from './helius'
 import { cacheGet, cacheSet } from './redis'
 
 /**
@@ -57,11 +57,13 @@ function fomoIdentity(chain: string) {
   return map
 }
 
-async function solanaMetrics(address: string): Promise<Omit<LiveWalletMetrics, 'handle' | 'displayName' | 'avatarUrl'>> {
-  const [pnl, portfolio, lastActivity] = await Promise.all([
+async function solanaMetrics(
+  address: string,
+  lastActivity: number | null
+): Promise<Omit<LiveWalletMetrics, 'handle' | 'displayName' | 'avatarUrl'>> {
+  const [pnl, portfolio] = await Promise.all([
     getWalletPnlSummary(address, '7d').catch(() => null),
     getWalletPortfolio(address).catch(() => null),
-    getLastActivityTime(address).catch(() => null),
   ])
   return {
     balance: portfolio?.totalValueUsd ?? null,
@@ -75,12 +77,15 @@ async function solanaMetrics(address: string): Promise<Omit<LiveWalletMetrics, '
 export async function getLiveWalletMetrics(chain: string, addresses: string[]): Promise<Map<string, LiveWalletMetrics>> {
   const result = new Map<string, LiveWalletMetrics>()
   const identity = fomoIdentity(chain)
+  const cached = await Promise.all(
+    addresses.map((address) => cacheGet<LiveWalletMetrics>(`watchlist:wallet:v1:${chain}:${address}`))
+  )
   const missing: string[] = []
-  for (const address of addresses) {
-    const cached = await cacheGet<LiveWalletMetrics>(`watchlist:wallet:v1:${chain}:${address}`)
-    if (cached) result.set(address, cached)
+  addresses.forEach((address, index) => {
+    const hit = cached[index]
+    if (hit) result.set(address, hit)
     else missing.push(address)
-  }
+  })
   if (missing.length === 0) return result
 
   let nativeBalances = new Map<string, number>()
@@ -95,25 +100,35 @@ export async function getLiveWalletMetrics(chain: string, addresses: string[]): 
     nativePrice = quotes.get(wrapped)?.price ?? 0
   }
 
-  for (const address of missing) {
-    const trader = identity.get(address.toLowerCase())
-    const measured =
-      chain === 'solana'
-        ? await solanaMetrics(address)
-        : {
-            balance: nativeBalances.has(address) && nativePrice > 0 ? nativeBalances.get(address)! * nativePrice : null,
-            pnl7d: trader?.pnl7dUsd ?? null,
-            winRate: null,
-            lastActive: null,
-          }
-    const metrics: LiveWalletMetrics = {
-      ...measured,
-      handle: trader?.handle ?? null,
-      displayName: trader?.displayName ?? null,
-      avatarUrl: trader?.avatarUrl || null,
-    }
-    result.set(address, metrics)
-    await cacheSet(`watchlist:wallet:v1:${chain}:${address}`, metrics, TTL_SECONDS)
-  }
+  // One batched Helius call for every wallet. Per-wallet calls each waited on the shared
+  // 750ms Helius throttle, so the page took most of a second per wallet.
+  const lastActivity =
+    chain === 'solana'
+      ? await getLastActivityTimes(missing).catch(() => new Map<string, number>())
+      : new Map<string, number>()
+
+  // Wallets load concurrently. Birdeye's own throttle still spaces the calls out.
+  await Promise.all(
+    missing.map(async (address) => {
+      const trader = identity.get(address.toLowerCase())
+      const measured =
+        chain === 'solana'
+          ? await solanaMetrics(address, lastActivity.get(address) ?? null)
+          : {
+              balance: nativeBalances.has(address) && nativePrice > 0 ? nativeBalances.get(address)! * nativePrice : null,
+              pnl7d: trader?.pnl7dUsd ?? null,
+              winRate: null,
+              lastActive: null,
+            }
+      const metrics: LiveWalletMetrics = {
+        ...measured,
+        handle: trader?.handle ?? null,
+        displayName: trader?.displayName ?? null,
+        avatarUrl: trader?.avatarUrl || null,
+      }
+      result.set(address, metrics)
+      await cacheSet(`watchlist:wallet:v1:${chain}:${address}`, metrics, TTL_SECONDS)
+    })
+  )
   return result
 }

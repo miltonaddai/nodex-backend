@@ -413,6 +413,34 @@ export async function getLastActivityTime(address: string): Promise<number | nul
   return signatures[0]?.blockTime ?? null
 }
 
+/**
+ * Last activity for many wallets in one batched JSON-RPC request, so a page of wallets waits on
+ * the Helius throttle once rather than once per wallet (750ms each). Wallets with no signatures,
+ * or a failed lookup, are left out.
+ */
+export async function getLastActivityTimes(addresses: string[]): Promise<Map<string, number>> {
+  const result = new Map<string, number>()
+  for (let index = 0; index < addresses.length; index += 20) {
+    const batch = addresses.slice(index, index + 20)
+    await throttleHelius()
+    const res = await fetch(`${config.helius.rpcUrl}/?api-key=${config.helius.apiKey}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(
+        batch.map((address, id) => ({ jsonrpc: '2.0', id, method: 'getSignaturesForAddress', params: [address, { limit: 1 }] }))
+      ),
+      signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
+    })
+    if (!res.ok) throw new Error(`Helius RPC getSignaturesForAddress batch error: ${res.status}`)
+    const body = (await res.json()) as Array<{ id: number; result?: Array<{ blockTime?: number | null }> }>
+    for (const entry of Array.isArray(body) ? body : []) {
+      const blockTime = entry.result?.[0]?.blockTime
+      if (blockTime) result.set(batch[entry.id], blockTime)
+    }
+  }
+  return result
+}
+
 // --- Token scanner ---------------------------------------------------------------------------
 
 export interface MintSecurity {
