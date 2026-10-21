@@ -1,5 +1,34 @@
 import { config } from '../config'
+import type { LaunchTransaction } from '../lib/insider-detection'
 import { throttleHelius } from './rate-limit'
+import { cacheGet, cacheSet } from './redis'
+
+// --- Credit meter ------------------------------------------------------------------------------
+
+/**
+ * Helius credits spent by this process, by call type. Costs follow Helius's published pricing
+ * (helius.dev/docs/billing/credits); they are an estimate, the dashboard is the source of truth.
+ */
+const credits = new Map<string, number>()
+
+/** Credits per call for plain JSON-RPC methods. Methods not listed cost 1. */
+const RPC_CREDITS: Record<string, number> = {
+  getTokenAccounts: 10,
+  getAsset: 10,
+  getAssetsByOwner: 10,
+  // Metered by response size, charged in getRawTransactionsForAddress / getSignaturesOldestFirst.
+  getTransactionsForAddress: 0,
+}
+
+function charge(kind: string, amount: number): void {
+  credits.set(kind, (credits.get(kind) ?? 0) + amount)
+}
+
+/** Total credits spent so far, and the breakdown by call type. */
+export function heliusCreditsUsed(): { total: number; byKind: Record<string, number> } {
+  const byKind = Object.fromEntries([...credits.entries()].sort((a, b) => b[1] - a[1]))
+  return { total: [...credits.values()].reduce((sum, value) => sum + value, 0), byKind }
+}
 
 export interface WalletAnalytics {
   address: string
@@ -75,7 +104,10 @@ export async function getAddressTransactionsPage(
     const res = await fetch(`${config.helius.baseUrl}/addresses/${address}/transactions?${params}`, {
       signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
     })
-    if (res.ok) return (await res.json()) as HeliusEnhancedTransaction[]
+    if (res.ok) {
+      charge('enhanced:addressHistory', 100)
+      return (await res.json()) as HeliusEnhancedTransaction[]
+    }
     if (res.status !== 429 || attempt === 2) {
       throw new Error(`Helius API error: ${res.status} ${res.statusText}`)
     }
@@ -170,6 +202,204 @@ export function normalizeTokenSwaps(
   return swaps
 }
 
+// --- Raw transactions (getTransactionsForAddress, full) -----------------------------------------
+//
+// Raw history costs 10 credits per 100 transactions; the Enhanced API costs 100 per call. Swaps,
+// launch activity and funding sources are all derived from balance changes, which raw
+// transactions carry in full, so nothing here needs Helius's parsing.
+
+interface RawTokenBalance {
+  accountIndex: number
+  mint: string
+  owner?: string
+  uiTokenAmount?: { amount?: string; decimals?: number }
+}
+
+export interface RawTransaction {
+  slot: number
+  blockTime: number | null
+  transaction: {
+    signatures: string[]
+    message: { accountKeys: string[] }
+  }
+  meta: {
+    err: unknown
+    fee: number
+    preBalances: number[]
+    postBalances: number[]
+    preTokenBalances?: RawTokenBalance[]
+    postTokenBalances?: RawTokenBalance[]
+    loadedAddresses?: { writable?: string[]; readonly?: string[] }
+  } | null
+}
+
+export interface RawTransactionsPage {
+  data: RawTransaction[]
+  paginationToken: string | null
+}
+
+/**
+ * One page of an address's full transactions. `fromBlockTime` is inclusive, so a caller resuming
+ * from its last seen block time gets that second again and must deduplicate by signature.
+ */
+export async function getRawTransactionsForAddress(
+  address: string,
+  options: {
+    sortOrder?: 'asc' | 'desc'
+    limit?: number
+    fromBlockTime?: number
+    paginationToken?: string | null
+    succeededOnly?: boolean
+  } = {}
+): Promise<RawTransactionsPage> {
+  if (!config.helius.apiKey) return { data: [], paginationToken: null }
+  const filters: Record<string, unknown> = {}
+  if (options.fromBlockTime) filters.blockTime = { gte: options.fromBlockTime }
+  if (options.succeededOnly !== false) filters.status = 'succeeded'
+  const result = await heliusRpc<{ data?: RawTransaction[]; paginationToken?: string | null }>('getTransactionsForAddress', [
+    address,
+    {
+      transactionDetails: 'full',
+      encoding: 'json',
+      maxSupportedTransactionVersion: 1,
+      sortOrder: options.sortOrder ?? 'asc',
+      limit: Math.min(Math.max(options.limit ?? 100, 1), 1000),
+      ...(options.paginationToken ? { paginationToken: options.paginationToken } : {}),
+      filters,
+    },
+  ])
+  const data = result.data ?? []
+  charge('rpc:getTransactionsForAddress:full', Math.max(1, Math.ceil(data.length / 100)) * 10)
+  return { data, paginationToken: result.paginationToken ?? null }
+}
+
+/** Every account key in transaction order, including those loaded from lookup tables. */
+function rawAccountKeys(tx: RawTransaction): string[] {
+  return [
+    ...tx.transaction.message.accountKeys,
+    ...(tx.meta?.loadedAddresses?.writable ?? []),
+    ...(tx.meta?.loadedAddresses?.readonly ?? []),
+  ]
+}
+
+/** Net raw-unit token change per (owner, mint), from pre/post token balances. */
+function rawTokenChanges(tx: RawTransaction): Array<{ owner: string; mint: string; raw: bigint; decimals: number }> {
+  const byAccount = new Map<number, { owner: string; mint: string; pre: bigint; post: bigint; decimals: number }>()
+  const read = (balances: RawTokenBalance[] | undefined, field: 'pre' | 'post') => {
+    for (const balance of balances ?? []) {
+      const entry = byAccount.get(balance.accountIndex) ?? {
+        owner: balance.owner ?? '',
+        mint: balance.mint,
+        pre: 0n,
+        post: 0n,
+        decimals: Number(balance.uiTokenAmount?.decimals ?? 0),
+      }
+      entry[field] = BigInt(balance.uiTokenAmount?.amount ?? '0')
+      if (!entry.owner && balance.owner) entry.owner = balance.owner
+      byAccount.set(balance.accountIndex, entry)
+    }
+  }
+  read(tx.meta?.preTokenBalances, 'pre')
+  read(tx.meta?.postTokenBalances, 'post')
+  return [...byAccount.values()]
+    .filter((entry) => entry.owner && entry.post !== entry.pre)
+    .map((entry) => ({ owner: entry.owner, mint: entry.mint, raw: entry.post - entry.pre, decimals: entry.decimals }))
+}
+
+/**
+ * Converts a raw transaction into the Enhanced-API shape the launch analysis reads: per-account
+ * native balance changes and per-owner token balance changes.
+ */
+export function rawToLaunchTransaction(tx: RawTransaction): LaunchTransaction {
+  const keys = rawAccountKeys(tx)
+  const pre = tx.meta?.preBalances ?? []
+  const post = tx.meta?.postBalances ?? []
+  const accountData: NonNullable<LaunchTransaction['accountData']> = keys.map((account, i) => ({
+    account,
+    nativeBalanceChange: Number(post[i] ?? 0) - Number(pre[i] ?? 0),
+    tokenBalanceChanges: [],
+  }))
+  // tokenDeltas only aggregates by owner, so the changes can sit on any entry.
+  const changes = rawTokenChanges(tx).map((change) => ({
+    userAccount: change.owner,
+    mint: change.mint,
+    rawTokenAmount: { tokenAmount: change.raw.toString(), decimals: change.decimals },
+  }))
+  if (accountData[0]) accountData[0].tokenBalanceChanges = changes
+  return {
+    signature: tx.transaction.signatures[0],
+    slot: tx.slot,
+    timestamp: tx.blockTime ?? undefined,
+    feePayer: keys[0],
+    transactionError: tx.meta?.err ?? undefined,
+    accountData,
+  }
+}
+
+const WSOL_MINT = 'So11111111111111111111111111111111111111112'
+
+/**
+ * Normalizes a raw transaction into at most one swap of `contract`, from the fee payer's net
+ * balance changes. Netting makes a self-transfer zero rather than flagging it, and collapses a
+ * multi-hop route into the single trade the wallet actually made.
+ */
+export function normalizeRawTokenSwap(
+  tx: RawTransaction,
+  contract: string,
+  launchedAt: number,
+  solUsdPrice: number
+): NormalizedSwap | null {
+  const signature = tx.transaction.signatures[0]
+  const blockTime = Number(tx.blockTime ?? 0)
+  if (!signature || !blockTime || !tx.meta || tx.meta.err) return null
+  const wallet = tx.transaction.message.accountKeys[0]
+  if (!wallet) return null
+
+  const changes = rawTokenChanges(tx).filter((change) => change.owner === wallet)
+  const sum = (mint: string) =>
+    changes
+      .filter((change) => change.mint === mint)
+      .reduce((total, change) => total + Number(change.raw) / 10 ** change.decimals, 0)
+  const tokenDelta = sum(contract)
+  if (tokenDelta === 0) return null
+  const isBuy = tokenDelta > 0
+
+  let quoteAmount = 0
+  let quoteSymbol: NormalizedSwap['quoteSymbol'] = 'SOL'
+  for (const [mint, symbol] of STABLECOINS) {
+    const delta = sum(mint)
+    if (isBuy ? delta < 0 : delta > 0) {
+      quoteAmount = Math.abs(delta)
+      quoteSymbol = symbol
+      break
+    }
+  }
+  if (quoteSymbol === 'SOL') {
+    // The fee payer's lamports include the network fee, which is not part of the trade.
+    const lamports = Number(tx.meta.postBalances[0] ?? 0) - Number(tx.meta.preBalances[0] ?? 0) + tx.meta.fee
+    const solDelta = lamports / 1e9 + sum(WSOL_MINT)
+    if (isBuy ? solDelta >= 0 : solDelta <= 0) return null
+    quoteAmount = Math.abs(solDelta)
+  }
+  const quoteUsd = quoteSymbol === 'SOL' ? quoteAmount * solUsdPrice : quoteAmount
+  if (!(quoteUsd > 0)) return null
+
+  return {
+    contract,
+    walletAddress: wallet,
+    signature,
+    eventIndex: 0,
+    side: isBuy ? 'buy' : 'sell',
+    tokenAmount: Math.abs(tokenDelta),
+    quoteAmount,
+    quoteSymbol,
+    quoteUsd,
+    blockTime,
+    minutesAfterLaunch: Math.max(0, Math.floor((blockTime - launchedAt) / 60)),
+    suspicious: blockTime < launchedAt,
+  }
+}
+
 export async function getWalletTransactions(address: string, chain: string) {
   if (!config.helius.apiKey && chain === 'solana') {
     return null
@@ -182,83 +412,73 @@ export async function getWalletTransactions(address: string, chain: string) {
   return null
 }
 
-export async function getSolanaWalletTokenCount(address: string): Promise<number | null> {
+export interface SolanaWalletEnrichment {
+  /** Portfolio value in USD, or the SOL balance valued at the fallback price if that fails. */
+  balance: number
+  tokensHeld: number
+}
+
+/** Leaderboard balances do not need to be fresher than a day, and each page costs 100 credits. */
+const WALLET_ENRICHMENT_TTL_SECONDS = 24 * 3600
+
+/**
+ * Portfolio value and token count from one pass over the Wallet API (100 credits a page). The
+ * value and the count used to be two separate passes over the same pages, and nothing was cached
+ * between pipeline runs.
+ */
+export async function getSolanaWalletEnrichment(address: string, solUsdPrice: number): Promise<SolanaWalletEnrichment> {
+  const key = `helius:wallet-enrichment:v1:${address}`
+  const cached = await cacheGet<SolanaWalletEnrichment>(key)
+  if (cached) return cached
+
+  const holdings = await getSolanaWalletHoldings(address)
+  let enrichment: SolanaWalletEnrichment
+  if (holdings) {
+    enrichment = { balance: Math.round(holdings.portfolioUsd), tokensHeld: holdings.tokenCount }
+  } else {
+    const solBalance = await getSolanaWalletBalance(address)
+    enrichment = { balance: solBalance === null ? 0 : Math.round(solBalance * solUsdPrice), tokensHeld: 0 }
+  }
+  await cacheSet(key, enrichment, WALLET_ENRICHMENT_TTL_SECONDS)
+  return enrichment
+}
+
+async function getSolanaWalletHoldings(address: string): Promise<{ portfolioUsd: number; tokenCount: number } | null> {
   if (!config.helius.apiKey) return null
 
-  let count = 0
-  let page = 1
-  let hasMore = true
-
-  while (hasMore) {
+  let portfolioUsd = 0
+  let tokenCount = 0
+  for (let page = 1; page <= 20; page++) {
     await throttleHelius()
     const res = await fetch(
       `https://api.helius.xyz/v1/wallet/${address}/balances?api-key=${config.helius.apiKey}&page=${page}&limit=100`,
       { signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs) }
     )
-    if (!res.ok) return page === 1 ? null : count
+    if (!res.ok) return page === 1 ? null : { portfolioUsd, tokenCount }
+    charge('wallet:balances', 100)
 
     const data = (await res.json()) as {
       balances?: Array<{ balance?: number; usdValue?: number | null }>
       pagination?: { hasMore?: boolean }
     }
-
     for (const token of data.balances ?? []) {
-      if ((token.balance ?? 0) > 0 || (token.usdValue ?? 0) > 0) count += 1
+      if (typeof token.usdValue === 'number' && Number.isFinite(token.usdValue)) portfolioUsd += token.usdValue
+      if ((token.balance ?? 0) > 0 || (token.usdValue ?? 0) > 0) tokenCount += 1
     }
-
-    hasMore = Boolean(data.pagination?.hasMore)
-    page += 1
-    if (page > 20) break
+    if (!data.pagination?.hasMore) break
   }
-
-  return count
+  return { portfolioUsd, tokenCount }
 }
 
-export async function getSolanaWalletPortfolioUsd(address: string): Promise<number | null> {
-  if (!config.helius.apiKey) return null
-
-  let total = 0
-  let page = 1
-  let hasMore = true
-
-  while (hasMore) {
-    await throttleHelius()
-    const res = await fetch(
-      `https://api.helius.xyz/v1/wallet/${address}/balances?api-key=${config.helius.apiKey}&page=${page}&limit=100`,
-      { signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs) }
-    )
-    if (!res.ok) return page === 1 ? null : total
-
-    const data = (await res.json()) as {
-      balances?: Array<{ usdValue?: number | null }>
-      pagination?: { hasMore?: boolean }
-    }
-
-    for (const token of data.balances ?? []) {
-      if (typeof token.usdValue === 'number' && Number.isFinite(token.usdValue)) {
-        total += token.usdValue
-      }
-    }
-
-    hasMore = Boolean(data.pagination?.hasMore)
-    page += 1
-    if (page > 20) break
-  }
-
-  return total
-}
-
+/** SOL balance via plain getBalance (1 credit) rather than the Enhanced balances endpoint (100). */
 export async function getSolanaWalletBalance(address: string): Promise<number | null> {
   if (!config.helius.apiKey) return null
-
-  await throttleHelius()
-  const res = await fetch(`${config.helius.baseUrl}/addresses/${address}/balances?api-key=${config.helius.apiKey}`, {
-    signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
-  })
-  if (!res.ok) return null
-
-  const data = (await res.json()) as { nativeBalance?: number }
-  return (data.nativeBalance ?? 0) / 1e9
+  try {
+    const result = await heliusRpc<{ value?: number }>('getBalance', [address])
+    return Number(result.value ?? 0) / 1e9
+  } catch {
+    return null
+  }
 }
 
 export async function getWalletLastActiveIso(address: string, chain: string): Promise<string | null> {
@@ -272,15 +492,6 @@ export async function getWalletLastActiveIso(address: string, chain: string): Pr
   } catch {
     return null
   }
-}
-
-export async function enrichSolanaWalletBalanceUsd(address: string, solUsdPrice: number): Promise<number> {
-  const portfolioUsd = await getSolanaWalletPortfolioUsd(address)
-  if (portfolioUsd !== null) return Math.round(portfolioUsd)
-
-  const solBalance = await getSolanaWalletBalance(address)
-  if (solBalance === null) return 0
-  return Math.round(solBalance * solUsdPrice)
 }
 
 // --- Launch-insider analysis ---------------------------------------------------------------
@@ -301,6 +512,7 @@ async function heliusRpc<T>(method: string, params: unknown): Promise<T> {
     if (!res.ok) throw new Error(`Helius RPC ${method} error: ${res.status}`)
     const json = (await res.json()) as { result?: T; error?: { message?: string } }
     if (json.error) throw new Error(`Helius RPC ${method} error: ${json.error.message ?? 'unknown'}`)
+    charge(`rpc:${method}`, RPC_CREDITS[method] ?? 1)
     return json.result as T
   }
   throw new Error(`Helius RPC ${method} rate limited`)
@@ -319,6 +531,7 @@ export async function getSignaturesOldestFirst(address: string, limit: number): 
     address,
     { transactionDetails: 'signatures', sortOrder: 'asc', limit: Math.min(Math.max(limit, 1), 1000) },
   ])
+  charge('rpc:getTransactionsForAddress:signatures', 10)
   return result.data ?? []
 }
 
@@ -339,6 +552,7 @@ export async function parseTransactions<T = HeliusEnhancedTransaction>(signature
         continue
       }
       if (!res.ok) throw new Error(`Helius parse error: ${res.status}`)
+      charge('enhanced:parse', 100)
       parsed.push(...((await res.json()) as T[]))
       break
     }
@@ -346,21 +560,43 @@ export async function parseTransactions<T = HeliusEnhancedTransaction>(signature
   return parsed
 }
 
-/** The wallet that sent this wallet its first meaningful SOL, or null if none is found early on. */
+/** A wallet's first funder never changes, so a found one is kept for a year. */
+const FUNDER_TTL_SECONDS = 365 * 86_400
+/** A wallet with no funding inflow yet may still receive one while it has few transactions. */
+const NO_FUNDER_TTL_SECONDS = 7 * 86_400
+
+/**
+ * The wallet that sent this wallet its first meaningful SOL, or null if none is found early on.
+ * Reads the wallet's first 15 raw transactions in one call (10 credits) instead of listing
+ * signatures and parsing them through the Enhanced API (110), and caches the answer.
+ */
 export async function getFundingSource(wallet: string): Promise<string | null> {
-  const signatures = (await getSignaturesOldestFirst(wallet, 15)).filter((s) => !s.err).map((s) => s.signature)
-  if (signatures.length === 0) return null
-  const txs = (await parseTransactions(signatures)).sort((a, b) => Number(a.timestamp ?? 0) - Number(b.timestamp ?? 0))
-  for (const tx of txs) {
-    const inflow = (tx.nativeTransfers ?? []).find(
-      (transfer) =>
-        transfer.toUserAccount === wallet &&
-        transfer.fromUserAccount !== wallet &&
-        Number(transfer.amount ?? 0) >= 1e7
-    )
-    if (inflow?.fromUserAccount) return inflow.fromUserAccount
+  const key = `helius:funder:v1:${wallet}`
+  const cached = await cacheGet<{ funder: string | null }>(key)
+  if (cached) return cached.funder
+
+  const { data } = await getRawTransactionsForAddress(wallet, { sortOrder: 'asc', limit: 15 })
+  let funder: string | null = null
+  for (const tx of data) {
+    if (!tx.meta) continue
+    const keys = rawAccountKeys(tx)
+    const index = keys.indexOf(wallet)
+    if (index < 0) continue
+    const delta = (i: number) => Number(tx.meta!.postBalances[i] ?? 0) - Number(tx.meta!.preBalances[i] ?? 0)
+    const inflow = delta(index) + (index === 0 ? tx.meta.fee : 0)
+    if (inflow < 1e7) continue
+    // The sender is the account that lost the most SOL, matching a native transfer's source.
+    let source = -1
+    for (let i = 0; i < keys.length; i++) {
+      if (i !== index && delta(i) < 0 && (source < 0 || delta(i) < delta(source))) source = i
+    }
+    if (source >= 0) {
+      funder = keys[source]
+      break
+    }
   }
-  return null
+  await cacheSet(key, { funder }, funder ? FUNDER_TTL_SECONDS : NO_FUNDER_TTL_SECONDS)
+  return funder
 }
 
 /**
@@ -432,6 +668,7 @@ export async function getLastActivityTimes(addresses: string[]): Promise<Map<str
       signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
     })
     if (!res.ok) throw new Error(`Helius RPC getSignaturesForAddress batch error: ${res.status}`)
+    charge('rpc:getSignaturesForAddress', batch.length)
     const body = (await res.json()) as Array<{ id: number; result?: Array<{ blockTime?: number | null }> }>
     for (const entry of Array.isArray(body) ? body : []) {
       const blockTime = entry.result?.[0]?.blockTime

@@ -12,7 +12,7 @@ import { isIndependentBuyer, isRealBuyer, normalizeTraderTags } from '../lib/wal
 import { allPeriodConfigs } from '../lib/periods'
 import { getTokenOverview } from '../services/birdeye'
 import { insertClickhouse, queryClickhouse } from '../services/clickhouse'
-import { getAddressTransactionsPage, normalizedSwapIdentity, normalizeTokenSwaps } from '../services/helius'
+import { getRawTransactionsForAddress, normalizeRawTokenSwap, type NormalizedSwap } from '../services/helius'
 
 interface LaunchRow {
   contract: string
@@ -137,6 +137,14 @@ async function saveCheckpoint(
 }
 
 /**
+ * v2 ingestion reads raw transactions oldest first from the last block time it stored. v1 read
+ * the Enhanced API newest first and, once a token was complete, stopped at the page cap without
+ * remembering where: every swap between that point and the previous run was skipped for good.
+ */
+const INGEST_WORKER = 'helius_launch_trades_v2'
+const LEGACY_INGEST_WORKER = 'helius_launch_trades'
+
+/**
  * Picks the next launches to ingest, never-ingested first, then least recently ingested.
  *
  * The previous implementation stored a positional cursor into a list sorted by launch time. Every
@@ -149,8 +157,8 @@ async function selectLaunchBatch(chain: string, launches: LaunchRow[]): Promise<
 
   const seen = await queryClickhouse<{ entity_key: string; updated_at: string }>(
     `SELECT entity_key, updated_at FROM worker_checkpoints FINAL
-     WHERE worker = 'helius_launch_trades' AND chain = {chain:String}`,
-    { chain }
+     WHERE worker = {worker:String} AND chain = {chain:String}`,
+    { worker: INGEST_WORKER, chain }
   )
   const lastIngested = new Map(seen.map((row) => [row.entity_key, timestamp(row.updated_at)]))
 
@@ -159,80 +167,83 @@ async function selectLaunchBatch(chain: string, launches: LaunchRow[]): Promise<
     .slice(0, config.worker.alphaTokensPerRun)
 }
 
+/** Signatures already stored for this token within the given time range. */
+async function storedSignatures(chain: string, contract: string, from: number, to: number): Promise<Set<string>> {
+  const rows = await queryClickhouse<{ signature: string }>(
+    `SELECT DISTINCT signature FROM wallet_token_trades
+     WHERE chain = {chain:String} AND contract = {contract:String}
+       AND block_time >= toDateTime({from:UInt32}) AND block_time <= toDateTime({to:UInt32})`,
+    { chain, contract, from, to }
+  )
+  return new Set(rows.map((row) => row.signature))
+}
+
+/** Where a token's ingestion resumes: its v2 checkpoint, else v1's if v1 had finished cleanly. */
+async function ingestStart(launch: LaunchRow, launchTime: number): Promise<number> {
+  const checkpoint = await getCheckpoint(INGEST_WORKER, launch.chain, launch.contract)
+  if (checkpoint) return Math.max(timestamp(checkpoint.last_block_time), launchTime)
+  // A v1 backfill that never finished left a gap below its cursor, so it restarts from launch;
+  // signature deduplication keeps the overlap from being stored twice.
+  const legacy = await getCheckpoint(LEGACY_INGEST_WORKER, launch.chain, launch.contract)
+  return legacy?.backfill_complete ? Math.max(timestamp(legacy.last_block_time), launchTime) : launchTime
+}
+
 async function ingestLaunchTrades(launch: LaunchRow, solUsdPrice: number): Promise<void> {
-  const worker = 'helius_launch_trades'
-  const checkpoint = await getCheckpoint(worker, launch.chain, launch.contract)
   const launchTime = timestamp(launch.launched_at)
-  const wasComplete = Boolean(checkpoint?.backfill_complete)
-  const previousNewest = checkpoint ? timestamp(checkpoint.last_block_time) : 0
-  let before = wasComplete ? undefined : checkpoint?.cursor || undefined
-  let newestSeen = previousNewest
-  let reachedBoundary = false
+  const from = await ingestStart(launch, launchTime)
+  const pageSize = config.worker.alphaTransactionPageSize
+  let paginationToken: string | null = null
+  let newestSeen = from
+  let reachedEnd = false
 
   for (let pageNumber = 0; pageNumber < config.worker.alphaBackfillPagesPerToken; pageNumber++) {
-    const transactions = await getAddressTransactionsPage(
-      launch.contract,
-      before,
-      config.worker.alphaTransactionPageSize
-    )
-    if (transactions.length === 0) {
-      reachedBoundary = true
-      break
+    const page = await getRawTransactionsForAddress(launch.contract, {
+      sortOrder: 'asc',
+      limit: pageSize,
+      fromBlockTime: from,
+      paginationToken,
+    })
+    const swaps = page.data
+      .map((tx) => normalizeRawTokenSwap(tx, launch.contract, launchTime, solUsdPrice))
+      .filter((swap): swap is NormalizedSwap => swap !== null)
+    if (swaps.length > 0) {
+      const times = swaps.map((swap) => swap.blockTime)
+      const stored = await storedSignatures(launch.chain, launch.contract, Math.min(...times), Math.max(...times))
+      const fresh = swaps.filter((swap) => !stored.has(swap.signature))
+      if (fresh.length > 0) {
+        await insertClickhouse(
+          'wallet_token_trades',
+          fresh.map((trade) => ({
+            chain: launch.chain,
+            contract: trade.contract,
+            wallet_address: trade.walletAddress,
+            signature: trade.signature,
+            event_index: trade.eventIndex,
+            side: trade.side,
+            token_amount: trade.tokenAmount,
+            quote_amount: trade.quoteAmount,
+            quote_symbol: trade.quoteSymbol,
+            quote_usd: trade.quoteUsd,
+            block_time: formatDate(trade.blockTime),
+            minutes_after_launch: trade.minutesAfterLaunch,
+            suspicious: trade.suspicious ? 1 : 0,
+            ingested_at: formatDate(Math.floor(Date.now() / 1000)),
+          }))
+        )
+      }
     }
 
-    const normalized = transactions.flatMap((tx) =>
-      normalizeTokenSwaps(tx, launch.contract, launchTime, solUsdPrice)
-    )
-    const relevant = [
-      ...new Map(
-        normalized
-          .filter((trade) => trade.blockTime >= launchTime && (!wasComplete || trade.blockTime > previousNewest))
-          .map((trade) => [normalizedSwapIdentity(trade), trade])
-      ).values(),
-    ]
-    if (relevant.length > 0) {
-      newestSeen = Math.max(newestSeen, ...relevant.map((trade) => trade.blockTime))
-      await insertClickhouse(
-        'wallet_token_trades',
-        relevant.map((trade) => ({
-          chain: launch.chain,
-          contract: trade.contract,
-          wallet_address: trade.walletAddress,
-          signature: trade.signature,
-          event_index: trade.eventIndex,
-          side: trade.side,
-          token_amount: trade.tokenAmount,
-          quote_amount: trade.quoteAmount,
-          quote_symbol: trade.quoteSymbol,
-          quote_usd: trade.quoteUsd,
-          block_time: formatDate(trade.blockTime),
-          minutes_after_launch: trade.minutesAfterLaunch,
-          suspicious: trade.suspicious ? 1 : 0,
-          ingested_at: formatDate(Math.floor(Date.now() / 1000)),
-        }))
-      )
-    }
-
-    const oldest = Math.min(...transactions.map((tx) => Number(tx.timestamp ?? Number.MAX_SAFE_INTEGER)))
-    if (oldest <= (wasComplete ? previousNewest : launchTime) || transactions.length < config.worker.alphaTransactionPageSize) {
-      reachedBoundary = true
+    for (const tx of page.data) newestSeen = Math.max(newestSeen, Number(tx.blockTime ?? 0))
+    if (!page.paginationToken || page.data.length < pageSize) {
+      reachedEnd = true
       break
     }
-    before = transactions[transactions.length - 1]?.signature
-    if (!before) {
-      reachedBoundary = true
-      break
-    }
+    paginationToken = page.paginationToken
   }
 
-  await saveCheckpoint(
-    worker,
-    launch.chain,
-    launch.contract,
-    wasComplete || reachedBoundary ? '' : before ?? '',
-    newestSeen,
-    wasComplete || reachedBoundary
-  )
+  // Resuming from the newest second seen re-reads that second next time, which the signature
+  // check absorbs. Stopping at the page cap loses nothing: the next visit continues from here.
+  await saveCheckpoint(INGEST_WORKER, launch.chain, launch.contract, '', newestSeen, reachedEnd)
 }
 
 export async function syncAlphaTradesForChain(chain: string): Promise<void> {
@@ -506,7 +517,7 @@ export async function refreshTokenScores(chain: string): Promise<void> {
   // backfilled token are lower bounds, so every ratio built on them flatters the token.
   const backfillRows = await queryClickhouse<{ entity_key: string; backfill_complete: number }>(
     `SELECT entity_key, backfill_complete FROM worker_checkpoints FINAL
-     WHERE worker = 'helius_launch_trades' AND chain = {chain:String}`,
+     WHERE worker = {worker:String} AND chain = {chain:String}`,
     { chain }
   )
   const backfillComplete = new Set(

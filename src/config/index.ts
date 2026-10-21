@@ -119,9 +119,11 @@ export const config = {
     alphaMaxTokenAgeDays: parseInt(process.env.ALPHA_MAX_TOKEN_AGE_DAYS || '30', 10),
     alphaMaxMarketCap: parseInt(process.env.ALPHA_MAX_MARKET_CAP || '20000000', 10),
     alphaTokenPageSize: parseInt(process.env.ALPHA_TOKEN_PAGE_SIZE || '50', 10),
-    alphaTransactionPageSize: parseInt(process.env.ALPHA_TRANSACTION_PAGE_SIZE || '100', 10),
-    // 3 pages (~300 transactions) left mature tokens capped around 60 observed buyers, which made
-    // any absolute buyer threshold a measure of sampling depth rather than of the token.
+    // Raw transactions per trade-ingestion request (max 1000). Helius bills raw history at 10
+    // credits per 100 transactions, so the page size sets latency, not cost.
+    alphaTransactionPageSize: parseInt(process.env.ALPHA_TRANSACTION_PAGE_SIZE || '500', 10),
+    // Page cap per token per visit. Ingestion resumes where it stopped, so the cap bounds the
+    // credits one visit can spend (15 x 500 transactions = 750 credits) without losing trades.
     alphaBackfillPagesPerToken: parseInt(process.env.ALPHA_BACKFILL_PAGES_PER_TOKEN || '15', 10),
     alphaTokensPerRun: parseInt(process.env.ALPHA_TOKENS_PER_RUN || '40', 10),
     // Minimum launch age before a token is worth evaluating. Hours-old launches are dominated by

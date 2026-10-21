@@ -1,5 +1,6 @@
 import { config } from '../config'
 import { recordPipelineSchedule } from '../services/clickhouse'
+import { heliusCreditsUsed } from '../services/helius'
 import { refreshAllWalletTokenPerformance, syncAllAlphaTrades } from './sync-alpha'
 import { syncAllTopTraders } from './sync-top-traders'
 import { syncAllTokens } from './sync-tokens'
@@ -17,6 +18,31 @@ let healthRunning = false
 
 function elapsedSeconds(startedAt: number): string {
   return ((Date.now() - startedAt) / 1000).toFixed(1)
+}
+
+/** Credits by call type spent since `before`, for the per-step log line. */
+function creditsSince(before: Record<string, number>): { total: number; byKind: Record<string, number> } {
+  const byKind: Record<string, number> = {}
+  let total = 0
+  for (const [kind, value] of Object.entries(heliusCreditsUsed().byKind)) {
+    const spent = value - (before[kind] ?? 0)
+    if (spent > 0) {
+      byKind[kind] = spent
+      total += spent
+    }
+  }
+  return { total, byKind }
+}
+
+/** Runs one pipeline step and logs the Helius credits it spent (estimated from published prices). */
+async function meteredStep(name: string, step: () => Promise<unknown>): Promise<void> {
+  const before = heliusCreditsUsed().byKind
+  try {
+    await step()
+  } finally {
+    const spent = creditsSince(before)
+    console.log(`[credits] ${name}: ${spent.total} Helius credits ${JSON.stringify(spent.byKind)}`)
+  }
 }
 
 async function runHealthRefresh(): Promise<void> {
@@ -72,23 +98,21 @@ async function runPipeline(): Promise<boolean> {
   }, timeoutMs)
   console.log(`[worker] Alpha intelligence pipeline started at ${new Date(startedAt).toISOString()}`)
   try {
-    await syncAllTokens()
-    await runHealthRefresh()
+    const runBefore = heliusCreditsUsed().byKind
+    await meteredStep('tokens', () => syncAllTokens())
+    await meteredStep('market-health', () => runHealthRefresh())
     // Feeds the wallets page: tokens the most profitable wallets are net buying right now.
-    await syncAllSmartMoneyBuys()
-    await syncAllTopTraders()
+    await meteredStep('smart-money', () => syncAllSmartMoneyBuys())
+    await meteredStep('top-traders', () => syncAllTopTraders())
     // Raw trade ingestion feeds wallet_token_trades and wallet_token_performance, which every
-    // downstream step reads. It had no call site at all, so coverage was frozen at whatever a
-    // one-off manual run had produced.
-    await syncAllAlphaTrades()
-    // Turns raw trades into per-wallet, per-token positions. This had no call site either, so
-    // wallet_token_performance only ever held rows written by the Birdeye top-traders path and
-    // nothing derived from our own ingested trades reached the wallets page.
-    await refreshAllWalletTokenPerformance()
-    await syncAllWallets()
+    // downstream step reads.
+    await meteredStep('trade-ingestion', () => syncAllAlphaTrades())
+    // Turns raw trades into per-wallet, per-token positions.
+    await meteredStep('wallet-performance', () => refreshAllWalletTokenPerformance())
+    await meteredStep('wallets', () => syncAllWallets())
     // Runs last and on its own candidate list: the churn screen above rejects bundled launches,
     // which are exactly the tokens this step exists to catch.
-    await syncAllInsiderPlays()
+    await meteredStep('insiders', () => syncAllInsiderPlays())
     // Last, so it sees every market cap this run wrote. Reads ClickHouse only, no API calls.
     // Isolated so a failure here never fails the run that produced the data.
     await syncTokenSightings(new Date(startedAt)).catch((error) =>
@@ -103,6 +127,7 @@ async function runPipeline(): Promise<boolean> {
     // scoring path has no consumer — re-enable it only once it preserves the churn columns.
     //
     // Trade ingestion, top traders and wallet sync stay: they feed the wallets page.
+    console.log(`[credits] pipeline total: ${creditsSince(runBefore).total} Helius credits`)
     console.log(`[worker] Alpha intelligence pipeline completed in ${elapsedSeconds(startedAt)}s`)
     return true
   } catch (error) {

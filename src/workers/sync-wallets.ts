@@ -2,7 +2,7 @@ import { config } from '../config'
 import { scoreWallet, scoreWalletReputation, type TokenPerformance } from '../lib/alpha-scoring'
 import { allPeriodConfigs } from '../lib/periods'
 import { insertClickhouse, queryClickhouse } from '../services/clickhouse'
-import { enrichSolanaWalletBalanceUsd, getSolanaWalletTokenCount } from '../services/helius'
+import { getSolanaWalletEnrichment } from '../services/helius'
 
 interface PerformanceRow {
   wallet_address: string
@@ -127,13 +127,8 @@ export async function syncWalletsForChain(chain: string): Promise<void> {
     for (const candidate of candidates) {
       let enrichment = enrichmentCache.get(candidate.address)
       if (!enrichment) {
-        enrichment = {
-          balance: await enrichSolanaWalletBalanceUsd(
-            candidate.address,
-            config.worker.solUsdPriceFallback
-          ),
-          tokensHeld: (await getSolanaWalletTokenCount(candidate.address)) ?? 0,
-        }
+        // Cached for a day across runs, so most candidates cost nothing here.
+        enrichment = await getSolanaWalletEnrichment(candidate.address, config.worker.solUsdPriceFallback)
         enrichmentCache.set(candidate.address, enrichment)
       }
       const totalTrades = candidate.rows.reduce((sum, row) => sum + Number(row.trade_count), 0)

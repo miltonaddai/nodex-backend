@@ -1,6 +1,6 @@
 import { config } from '../config'
 import { insertClickhouse, queryClickhouse } from '../services/clickhouse'
-import { enrichSolanaWalletBalanceUsd, getSolanaWalletTokenCount } from '../services/helius'
+import { getSolanaWalletEnrichment } from '../services/helius'
 
 interface TopHolderRow {
   wallet_address: string
@@ -83,11 +83,10 @@ export async function syncHolderWealth(chain: string): Promise<void> {
 
   for (const { wallet_address: wallet } of wallets) {
     try {
-      const netWorthUsd = await enrichSolanaWalletBalanceUsd(
+      const { balance: netWorthUsd, tokensHeld } = await getSolanaWalletEnrichment(
         wallet,
         config.worker.solUsdPriceFallback
       )
-      const tokensHeld = (await getSolanaWalletTokenCount(wallet)) ?? 0
       rows.push({
         wallet_address: wallet,
         chain,

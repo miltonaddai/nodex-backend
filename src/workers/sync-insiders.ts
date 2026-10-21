@@ -16,11 +16,11 @@ import { cacheDeletePattern } from '../services/redis'
 import { getSolanaTokenMarketHealth } from '../services/dexscreener'
 import {
   getFundingSource,
-  getSignaturesOldestFirst,
+  getRawTransactionsForAddress,
   getTokenHolderBalances,
   getTokenSupply,
   isHighThroughputWallet,
-  parseTransactions,
+  rawToLaunchTransaction,
 } from '../services/helius'
 
 /**
@@ -74,13 +74,14 @@ export async function analyzeLaunch(
   supply: number,
   funderLookups = config.worker.insiderFunderLookups
 ): Promise<{ report: LaunchInsiderReport; launchedAt: number } | null> {
-  const signatures = await getSignaturesOldestFirst(mint, 1000)
-  const first = signatures.find((s) => s.blockTime)
+  // The earliest successful transactions as raw data, in one call: 10 credits per 100 instead
+  // of a signature listing plus 100 credits per 100 through the Enhanced parser.
+  const { data } = await getRawTransactionsForAddress(mint, { sortOrder: 'asc', limit: config.worker.insiderMaxLaunchTxs })
+  const first = data.find((tx) => tx.blockTime)
   if (!first?.blockTime) return null
   // The window is timed from the first token movement inside collectLaunchActivity, since
   // trading can open well after the mint is created.
-  const earliest = signatures.filter((s) => !s.err).slice(0, config.worker.insiderMaxLaunchTxs)
-  const txs = await parseTransactions<LaunchTransaction>(earliest.map((s) => s.signature))
+  const txs: LaunchTransaction[] = data.map(rawToLaunchTransaction)
   const activity = collectLaunchActivity(txs, mint, config.worker.insiderLaunchWindowSeconds)
 
   const lookups = [...activity.buyers.values()]
