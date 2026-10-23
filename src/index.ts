@@ -27,7 +27,7 @@ const devOrigins = new Set([
   'http://localhost:5175',
 ])
 
-
+//railway deployment 
 
 app.use(
   cors({
