@@ -288,27 +288,44 @@ function toPerformanceTrade(row: TradeRow): TradeForPerformance {
   }
 }
 
+/**
+ * Tokens per trade query in refreshWalletTokenPerformance. Loading every trade in one query held 2.5M rows
+ * (~386K wallets) in memory at once and ran the worker out of heap; a batch keeps memory bounded by the
+ * busiest tokens rather than by the whole table.
+ */
+const PERFORMANCE_TOKENS_PER_BATCH = 25
+
 export async function refreshWalletTokenPerformance(chain: string): Promise<void> {
   const launches = await getRecentLaunches(chain)
   if (launches.length === 0) return
   const launchMap = new Map(launches.map((launch) => [launch.contract, launch]))
-  const trades = await queryClickhouse<TradeRow>(
-    `SELECT * FROM wallet_token_trades FINAL
-     WHERE chain = {chain:String}
-       AND block_time >= now() - toIntervalDay({maxAgeDays:UInt16})`,
-    { chain, maxAgeDays: config.worker.alphaMaxTokenAgeDays }
-  )
   const now = Math.floor(Date.now() / 1000)
+  const periods = allPeriodConfigs().map((period) => ({
+    days: period.days,
+    cutoff: now - Math.min(period.days, config.worker.alphaMaxTokenAgeDays) * 86_400,
+  }))
+  let tradeCount = 0
+  let rowCount = 0
 
-  for (const period of allPeriodConfigs()) {
-    const cutoff = now - Math.min(period.days, config.worker.alphaMaxTokenAgeDays) * 86_400
-    const groups = new Map<string, TradeRow[]>()
+  for (let i = 0; i < launches.length; i += PERFORMANCE_TOKENS_PER_BATCH) {
+    const contracts = launches.slice(i, i + PERFORMANCE_TOKENS_PER_BATCH).map((launch) => launch.contract)
+    const trades = await queryClickhouse<TradeRow>(
+      `SELECT contract, wallet_address, side, token_amount, quote_usd, block_time, minutes_after_launch, suspicious
+       FROM wallet_token_trades FINAL
+       WHERE chain = {chain:String}
+         AND contract IN {contracts:Array(String)}
+         AND block_time >= now() - toIntervalDay({maxAgeDays:UInt16})`,
+      { chain, contracts, maxAgeDays: config.worker.alphaMaxTokenAgeDays }
+    )
+    tradeCount += trades.length
+
+    // Group once per wallet and token; each period then filters the group by its own cutoff
+    const groups = new Map<string, TradeForPerformance[]>()
     for (const trade of trades) {
-      if (timestamp(trade.block_time) < cutoff || !launchMap.has(trade.contract)) continue
       const key = `${trade.wallet_address}:${trade.contract}`
-      const current = groups.get(key) ?? []
-      current.push(trade)
-      groups.set(key, current)
+      const current = groups.get(key)
+      if (current) current.push(toPerformanceTrade(trade))
+      else groups.set(key, [toPerformanceTrade(trade)])
     }
 
     const rows: Record<string, unknown>[] = []
@@ -318,17 +335,18 @@ export async function refreshWalletTokenPerformance(chain: string): Promise<void
       const contract = key.slice(separator + 1)
       const launch = launchMap.get(contract)
       if (!launch) continue
-      const performance = aggregateTokenPerformance(
-        contract,
-        timestamp(launch.launched_at),
-        Number(launch.price),
-        groupedTrades.map(toPerformanceTrade)
-      )
-      if (!performance) continue
-      rows.push(performanceRow(chain, period.days, wallet, launch, performance, now))
+      for (const period of periods) {
+        const inPeriod = groupedTrades.filter((trade) => trade.blockTime >= period.cutoff)
+        if (inPeriod.length === 0) continue
+        const performance = aggregateTokenPerformance(contract, timestamp(launch.launched_at), Number(launch.price), inPeriod)
+        if (!performance) continue
+        rows.push(performanceRow(chain, period.days, wallet, launch, performance, now))
+      }
     }
     await insertClickhouse('wallet_token_performance', rows)
+    rowCount += rows.length
   }
+  console.log(`[sync-alpha] ${chain} wallet performance: ${rowCount} rows from ${tradeCount} trades across ${launches.length} tokens`)
 }
 
 function performanceRow(

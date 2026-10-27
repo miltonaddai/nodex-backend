@@ -63,8 +63,8 @@ export async function syncWalletsForChain(chain: string): Promise<void> {
   for (const period of allPeriodConfigs()) {
     // Only positions in churn-qualified tokens count. A wallet earns its place here by trading
     // tokens the product considers real, not by trading whatever ingestion happened to cover.
-    const performanceRows = await queryClickhouse<PerformanceRow>(
-      `SELECT p.* FROM wallet_token_performance AS p FINAL
+    const positions = `
+       FROM wallet_token_performance AS p FINAL
        INNER JOIN (
          SELECT DISTINCT contract
          FROM token_analytics FINAL
@@ -72,13 +72,31 @@ export async function syncWalletsForChain(chain: string): Promise<void> {
        ) AS q ON q.contract = p.contract
        WHERE p.chain = {chain:String}
          AND p.period_days = {periodDays:UInt16}
-         AND p.last_trade_at >= now() - toIntervalDay({activeDays:UInt16})`,
-      {
-        chain,
-        periodDays: period.days,
-        activeDays: Math.min(period.days, config.worker.alphaMaxTokenAgeDays),
-      }
+         AND p.last_trade_at >= now() - toIntervalDay({activeDays:UInt16})`
+    const params = {
+      chain,
+      periodDays: period.days,
+      activeDays: Math.min(period.days, config.worker.alphaMaxTokenAgeDays),
+    }
+    // The candidate filter and ranking below only need per-wallet totals, so ClickHouse picks the
+    // shortlist and full rows are fetched for those wallets alone. Loading every row (500K+ per
+    // period) ran the worker out of heap.
+    const shortlist = await queryClickhouse<{ wallet_address: string }>(
+      `SELECT p.wallet_address AS wallet_address
+       ${positions}
+       GROUP BY p.wallet_address
+       HAVING uniqExact(p.contract) >= {minTokens:UInt32}
+         AND sum(p.realized_pnl + p.unrealized_pnl) > 0
+       ORDER BY uniqExact(p.contract) DESC, sum(p.realized_pnl + p.unrealized_pnl) DESC
+       LIMIT {limit:UInt32}`,
+      { ...params, minTokens: config.worker.walletMinQualifiedTokens, limit: config.worker.walletHeliusEnrichLimit }
     )
+    const performanceRows = shortlist.length
+      ? await queryClickhouse<PerformanceRow>(
+          `SELECT p.* ${positions} AND p.wallet_address IN {wallets:Array(String)}`,
+          { ...params, wallets: shortlist.map((row) => row.wallet_address) }
+        )
+      : []
     const groups = new Map<string, PerformanceRow[]>()
     for (const row of performanceRows) {
       const current = groups.get(row.wallet_address) ?? []
