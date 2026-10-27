@@ -1,10 +1,10 @@
 import { config } from '../config'
 import { allPeriodConfigs } from '../lib/periods'
 import { discoverQualityTokens, pickTokenPeriodFields, type DiscoveredToken } from '../services/birdeye'
-import { insertClickhouse } from '../services/clickhouse'
+import { insertClickhouse, queryClickhouse } from '../services/clickhouse'
 import { getHolderCounts, isBlockscoutConfigured } from '../services/blockscout'
 import { getTokenQuotes } from '../services/dexscreener'
-import { cacheDeletePattern } from '../services/redis'
+import { cacheDeletePattern, publishFlags } from '../services/redis'
 
 /** Chains whose holder counts come from Blockscout because Birdeye has none. */
 const BLOCKSCOUT_HOLDER_CHAINS = new Set(['robinhood'])
@@ -74,6 +74,8 @@ export async function syncTokensForChain(chain: string): Promise<void> {
 
     const withListing = tokens.filter((token) => token.listedAt > 0)
     const updatedAt = formatNow()
+    // Read before this run writes its rows: a token with no row yet is flagged for the first time
+    const known = await previouslyFlagged(chain, withListing)
 
     await insertClickhouse(
       'token_launches',
@@ -133,6 +135,7 @@ export async function syncTokensForChain(chain: string): Promise<void> {
 
     // Any cache version: the prefix changes whenever the response shape does.
     await cacheDeletePattern(`*:tokens:top:${chain}:*`)
+    await announceNewFlags(chain, withListing, known)
 
     const summary = withListing
       .slice(0, 5)
@@ -143,6 +146,43 @@ export async function syncTokensForChain(chain: string): Promise<void> {
     )
   } catch (err) {
     console.error(`[sync-tokens] Failed ${chain}:`, err)
+  }
+}
+
+/**
+ * Tokens an earlier run already flagged: token_analytics keeps a row per flagged token (no TTL).
+ * Sightings can't answer this — they only cover tokens that passed market health or sit on another list.
+ * Null when the lookup fails, so nothing gets announced as new by mistake.
+ */
+async function previouslyFlagged(chain: string, tokens: DiscoveredToken[]): Promise<Set<string> | null> {
+  if (tokens.length === 0) return new Set()
+  try {
+    const rows = await queryClickhouse<{ contract: string }>(
+      `SELECT DISTINCT contract FROM token_analytics
+       WHERE chain = {chain:String} AND contract IN {contracts:Array(String)}`,
+      { chain, contracts: tokens.map((token) => token.address) }
+    )
+    return new Set(rows.map((row) => row.contract))
+  } catch (error) {
+    console.warn(`[sync-tokens] Could not look up earlier ${chain} flags:`, error)
+    return null
+  }
+}
+
+/**
+ * Tells trading bots (surgebot/) which tokens this run flagged for the first time, over Redis pub/sub.
+ * Published even when nothing is new, so a bot can tell the scanner ran.
+ */
+async function announceNewFlags(chain: string, tokens: DiscoveredToken[], known: Set<string> | null): Promise<void> {
+  try {
+    const flaggedAt = Date.now()
+    const fresh = tokens
+      .filter((token) => known !== null && !known.has(token.address))
+      .map((token) => ({ contract: token.address, symbol: token.symbol, name: token.name, image: token.imageUrl, flaggedAt }))
+    await publishFlags(chain, { chain, runAt: flaggedAt, qualified: tokens.length, tokens: fresh })
+    console.log(`[sync-tokens] Announced ${fresh.length} new ${chain} flags (${tokens.length} qualified)`)
+  } catch (error) {
+    console.warn(`[sync-tokens] Could not announce ${chain} flags:`, error)
   }
 }
 

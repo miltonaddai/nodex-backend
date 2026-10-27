@@ -46,3 +46,24 @@ export async function cacheDeletePattern(pattern: string): Promise<number> {
     return 0
   }
 }
+
+/** Channel and key the worker uses to tell trading bots (surgebot/) which tokens a run newly flagged. */
+export const FLAGS_CHANNEL = (chain: string) => `nodex:flags:${chain}`
+export const FLAGS_LATEST_KEY = (chain: string) => `nodex:flags:${chain}:latest`
+
+/**
+ * Publishes a run's newly flagged tokens and keeps the latest run under a key, so a subscriber that was
+ * disconnected during the publish still finds it. Failures are logged, never thrown: the pipeline must
+ * not depend on a bot being reachable.
+ */
+export async function publishFlags(chain: string, payload: unknown, ttlSeconds = 3 * 3600): Promise<void> {
+  const client = getRedis()
+  if (!client) return
+  try {
+    const body = JSON.stringify(payload)
+    await client.setex(FLAGS_LATEST_KEY(chain), ttlSeconds, body)
+    await client.publish(FLAGS_CHANNEL(chain), body)
+  } catch (error) {
+    console.warn(`[redis] Could not publish ${chain} flags:`, error)
+  }
+}
