@@ -1,20 +1,22 @@
 import { config } from '../config'
 import { recordPipelineSchedule } from '../services/clickhouse'
 import { heliusCreditsUsed } from '../services/helius'
-import { refreshAllWalletTokenPerformance, syncAllAlphaTrades } from './sync-alpha'
-import { syncAllTopTraders } from './sync-top-traders'
-import { syncAllTokens } from './sync-tokens'
-import { syncAllWallets } from './sync-wallets'
-import { refreshAllTokenMarketHealth } from './sync-market-health'
+// TOKENS PAGE DISABLED — these steps only feed the hidden tokens page (and the unlinked
+// /wallets/top leaderboard). Un-comment together with the steps in runPipeline to restore it.
+// import { refreshAllWalletTokenPerformance, syncAllAlphaTrades } from './sync-alpha'
+// import { syncAllTopTraders } from './sync-top-traders'
+// import { syncAllTokens } from './sync-tokens'
+// import { syncAllWallets } from './sync-wallets'
+// import { refreshAllTokenMarketHealth } from './sync-market-health'
 import { syncAllInsiderPlays } from './sync-insiders'
 import { syncAllSmartMoneyBuys } from './sync-smart-money'
 import { syncTokenSightings } from './sync-sightings'
 
 let pipelineTimer: NodeJS.Timeout | null = null
-let healthTimer: NodeJS.Timeout | null = null
+// let healthTimer: NodeJS.Timeout | null = null
 let running = false
 let nextRunAt = new Date()
-let healthRunning = false
+// let healthRunning = false
 
 function elapsedSeconds(startedAt: number): string {
   return ((Date.now() - startedAt) / 1000).toFixed(1)
@@ -45,20 +47,21 @@ async function meteredStep(name: string, step: () => Promise<unknown>): Promise<
   }
 }
 
-async function runHealthRefresh(): Promise<void> {
-  if (healthRunning) return
-  healthRunning = true
-  const startedAt = Date.now()
-  console.log(`[worker] Market health refresh started at ${new Date(startedAt).toISOString()}`)
-  try {
-    await refreshAllTokenMarketHealth()
-    console.log(`[worker] Market health refresh completed in ${elapsedSeconds(startedAt)}s`)
-  } catch (error) {
-    console.error('[worker] Token market health refresh failed:', error)
-  } finally {
-    healthRunning = false
-  }
-}
+// TOKENS PAGE DISABLED — market health only covers token_launches, which token discovery fills.
+// async function runHealthRefresh(): Promise<void> {
+//   if (healthRunning) return
+//   healthRunning = true
+//   const startedAt = Date.now()
+//   console.log(`[worker] Market health refresh started at ${new Date(startedAt).toISOString()}`)
+//   try {
+//     await refreshAllTokenMarketHealth()
+//     console.log(`[worker] Market health refresh completed in ${elapsedSeconds(startedAt)}s`)
+//   } catch (error) {
+//     console.error('[worker] Token market health refresh failed:', error)
+//   } finally {
+//     healthRunning = false
+//   }
+// }
 
 /**
  * Records when the next pipeline run is due, and whether one is writing now. The frontend counts
@@ -99,17 +102,20 @@ async function runPipeline(): Promise<boolean> {
   console.log(`[worker] Alpha intelligence pipeline started at ${new Date(startedAt).toISOString()}`)
   try {
     const runBefore = heliusCreditsUsed().byKind
-    await meteredStep('tokens', () => syncAllTokens())
-    await meteredStep('market-health', () => runHealthRefresh())
+    // TOKENS PAGE DISABLED — token discovery and the steps that build on its churn-qualified
+    // list. They feed only the hidden tokens page and the /wallets/top leaderboard, which no page
+    // links to. Un-comment together with the imports above to restore them.
+    // await meteredStep('tokens', () => syncAllTokens())
+    // await meteredStep('market-health', () => runHealthRefresh())
     // Feeds the wallets page: tokens the most profitable wallets are net buying right now.
     await meteredStep('smart-money', () => syncAllSmartMoneyBuys())
-    await meteredStep('top-traders', () => syncAllTopTraders())
-    // Raw trade ingestion feeds wallet_token_trades and wallet_token_performance, which every
-    // downstream step reads.
-    await meteredStep('trade-ingestion', () => syncAllAlphaTrades())
-    // Turns raw trades into per-wallet, per-token positions.
-    await meteredStep('wallet-performance', () => refreshAllWalletTokenPerformance())
-    await meteredStep('wallets', () => syncAllWallets())
+    // await meteredStep('top-traders', () => syncAllTopTraders())
+    // // Raw trade ingestion feeds wallet_token_trades and wallet_token_performance, which every
+    // // downstream step reads.
+    // await meteredStep('trade-ingestion', () => syncAllAlphaTrades())
+    // // Turns raw trades into per-wallet, per-token positions.
+    // await meteredStep('wallet-performance', () => refreshAllWalletTokenPerformance())
+    // await meteredStep('wallets', () => syncAllWallets())
     // Runs last and on its own candidate list: the churn screen above rejects bundled launches,
     // which are exactly the tokens this step exists to catch.
     await meteredStep('insiders', () => syncAllInsiderPlays())
@@ -126,7 +132,6 @@ async function runPipeline(): Promise<boolean> {
     // maturity window from the list. The route ranks on churn now, not alpha_score, so the alpha
     // scoring path has no consumer — re-enable it only once it preserves the churn columns.
     //
-    // Trade ingestion, top traders and wallet sync stay: they feed the wallets page.
     console.log(`[credits] pipeline total: ${creditsSince(runBefore).total} Helius credits`)
     console.log(`[worker] Alpha intelligence pipeline completed in ${elapsedSeconds(startedAt)}s`)
     return true
@@ -145,7 +150,7 @@ async function main(): Promise<void> {
     console.log('[worker] WORKER_ENABLED=false; worker will not start')
     return
   }
-  console.log('NodeX Solana alpha worker starting...')
+  console.log('WhaleMo Solana alpha worker starting...')
   console.log(`Chains: ${config.worker.syncChains.join(', ')}`)
 
   // Once mode is for a scheduler (a Railway cron job) that starts the worker on each run. A
@@ -161,21 +166,22 @@ async function main(): Promise<void> {
   console.log(`Pipeline interval: ${config.worker.tokenSyncIntervalMinutes}m`)
   console.log(`Pipeline timeout: ${config.worker.pipelineTimeoutMinutes}m`)
   pipelineTimer = setInterval(() => void runPipeline(), config.worker.tokenSyncIntervalMinutes * 60 * 1000)
-  if (config.worker.dexScreenerRefreshIntervalMinutes > 0) {
-    console.log(`Market health interval: ${config.worker.dexScreenerRefreshIntervalMinutes}m`)
-    healthTimer = setInterval(
-      () => void runHealthRefresh(),
-      config.worker.dexScreenerRefreshIntervalMinutes * 60 * 1000
-    )
-  } else {
-    console.log('Market health interval: with pipeline only')
-  }
+  // TOKENS PAGE DISABLED — the market health refresh is off with token discovery, so no timer.
+  // if (config.worker.dexScreenerRefreshIntervalMinutes > 0) {
+  //   console.log(`Market health interval: ${config.worker.dexScreenerRefreshIntervalMinutes}m`)
+  //   healthTimer = setInterval(
+  //     () => void runHealthRefresh(),
+  //     config.worker.dexScreenerRefreshIntervalMinutes * 60 * 1000
+  //   )
+  // } else {
+  //   console.log('Market health interval: with pipeline only')
+  // }
   await runPipeline()
 }
 
 function shutdown(): void {
   if (pipelineTimer) clearInterval(pipelineTimer)
-  if (healthTimer) clearInterval(healthTimer)
+  // if (healthTimer) clearInterval(healthTimer)
   process.exit(0)
 }
 

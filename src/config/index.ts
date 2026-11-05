@@ -1,5 +1,6 @@
 import dotenv from 'dotenv'
 import type { Request } from 'express'
+import { readKeys } from '../services/api-key-pool'
 
 dotenv.config()
 
@@ -50,13 +51,18 @@ export const config = {
   },
 
   helius: {
-    apiKey: process.env.HELIUS_API_KEY || '',
+    // Several keys are allowed (HELIUS_API_KEY, HELIUS_API_KEY_2, …); see services/api-key-pool.
+    // apiKey is the first, kept for the "is Helius configured" checks.
+    apiKeys: readKeys('HELIUS_API_KEY'),
+    apiKey: readKeys('HELIUS_API_KEY')[0] ?? '',
     baseUrl: 'https://api.helius.xyz/v0',
     rpcUrl: 'https://mainnet.helius-rpc.com',
   },
 
   birdeye: {
-    apiKey: process.env.BIRDEYE_API_KEY || '',
+    // Several keys are allowed (BIRDEYE_API_KEY, BIRDEYE_API_KEY_2, …); see services/api-key-pool.
+    apiKeys: readKeys('BIRDEYE_API_KEY'),
+    apiKey: readKeys('BIRDEYE_API_KEY')[0] ?? '',
     // Gap between Birdeye calls. The Lite plan allows 15 requests per second, so 100ms (10 per
     // second) leaves headroom. The free plan needs about 1000.
     minIntervalMs: parseInt(process.env.BIRDEYE_MIN_INTERVAL_MS || '100', 10),
@@ -87,11 +93,8 @@ export const config = {
   /**
    * Master switch for the subscription/paywall layer.
    *
-   * Off by default: this is a personal-use deployment, so every authenticated user gets full
-   * access. All of the billing code (Stripe service, billing routes, subscription lookups,
-   * pricing/billing UI) is intentionally left in place and merely bypassed — set
-   * SUBSCRIPTIONS_ENABLED=true and un-comment the billing wiring marked
-   * "SUBSCRIPTIONS DISABLED" to turn the paywall back on.
+   * Off, every authenticated user gets full access and the subscription checks are bypassed.
+   * Keep it in step with VITE_SUBSCRIPTIONS_ENABLED on the frontend.
    */
   subscriptionsEnabled: process.env.SUBSCRIPTIONS_ENABLED === 'true',
 

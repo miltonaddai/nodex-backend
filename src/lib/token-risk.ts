@@ -1,6 +1,6 @@
 /**
  * Buy-or-avoid assessment for the token scanner. Each check is a lesson from tokens reviewed
- * while building NodeX: pulled liquidity behind a live-looking chart, launches bundled by one
+ * while building WhaleMo: pulled liquidity behind a live-looking chart, launches bundled by one
  * person, bot farms that inflate holder counts, and contracts that can still mint or freeze.
  *
  * This is risk triage, not a prediction. A clean report means none of the known traps were

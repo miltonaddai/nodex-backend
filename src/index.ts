@@ -10,13 +10,12 @@ import insiderRoutes from './routes/insiders'
 import smartMoneyRoutes from './routes/smart-money'
 import scannerRoutes from './routes/scanner'
 import watchlistRoutes from './routes/watchlist'
-// SUBSCRIPTIONS DISABLED — billing router kept in the tree, just not mounted.
-// import billingRoutes, { billingWebhook } from './routes/billing'
+import billingRoutes, { billingWebhook } from './routes/billing'
 
 const app = express()
 
-// SUBSCRIPTIONS DISABLED — Stripe webhook receiver.
-// app.post('/api/billing/webhook', express.raw({ type: 'application/json' }), billingWebhook)
+// Stripe webhook receiver. Registered before express.json() because it needs the raw body.
+app.post('/api/billing/webhook', express.raw({ type: 'application/json' }), billingWebhook)
 
 app.use(helmet())
 
@@ -49,8 +48,7 @@ app.get('/api/health', (_req, res) => {
 })
 
 app.use('/api/auth', authRoutes)
-// SUBSCRIPTIONS DISABLED — re-mount to restore checkout/portal/billing endpoints.
-// app.use('/api/billing', billingRoutes)
+app.use('/api/billing', billingRoutes)
 app.use('/api/wallets', walletRoutes)
 app.use('/api/tokens', tokenRoutes)
 app.use('/api/insiders', insiderRoutes)
@@ -64,7 +62,7 @@ app.use((_req, res) => {
 })
 
 app.listen(config.port, () => {
-  console.log(`NodeX API running on http://localhost:${config.port}`)
+  console.log(`WhaleMo API running on http://localhost:${config.port}`)
 })
 
 export default app

@@ -10,7 +10,7 @@ import { getLargestHolders, getMintSecurity, getOwnerTokenBalance, type MintSecu
 import { analyzeLaunch } from '../workers/sync-insiders'
 
 /**
- * Token scanner: everything NodeX knows about one token, and a buy-or-avoid verdict.
+ * Token scanner: everything WhaleMo knows about one token, and a buy-or-avoid verdict.
  *
  * The main scan is fast (market, security, holders, smart money). The launch bundle analysis
  * reads the token's first transactions and funders, costs 40-60 Helius calls and takes up to a

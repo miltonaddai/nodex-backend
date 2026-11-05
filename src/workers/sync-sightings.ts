@@ -2,7 +2,7 @@ import { advanceSighting, type Reading, type Sighting } from '../lib/sightings'
 import { getClickhouse, insertClickhouse, queryClickhouse } from '../services/clickhouse'
 
 /**
- * First-seen time and peak market cap for every token NodeX lists.
+ * First-seen time and peak market cap for every token WhaleMo lists.
  *
  * Runs last in each pipeline run and reads only market caps that run already wrote: the tokens
  * table's market health check, the latest smart money snapshot and the refreshed insider plays.

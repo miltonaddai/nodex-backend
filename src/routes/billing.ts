@@ -27,9 +27,8 @@ function parsePlan(value: unknown): SubscriptionPlan | null {
   return value === 'starter' || value === 'pro' ? value : null
 }
 
-function planPrice(plan: SubscriptionPlan): number {
-  return plan === 'pro' ? 49 : 29
-}
+/** One flat plan. Shown until Stripe returns the live price, which replaces it below. */
+const PLAN_PRICE_USD = 25
 
 function formatPaymentMethod(
   paymentMethod: Stripe.PaymentMethod | null | undefined
@@ -93,7 +92,7 @@ router.get('/subscription', authMiddleware, async (req: AuthRequest, res: Respon
       plan: entitled.plan,
       status: entitled.status,
       currentPeriodEnd: entitled.currentPeriodEnd,
-      amount: planPrice(entitled.plan),
+      amount: PLAN_PRICE_USD,
       interval: 'month' as const,
       paymentMethod: null as ReturnType<typeof formatPaymentMethod>,
     }

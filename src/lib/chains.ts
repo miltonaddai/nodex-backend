@@ -1,5 +1,5 @@
 /**
- * Chains NodeX covers. Solana gets the full pipeline. The EVM chains get discovery, market
+ * Chains WhaleMo covers. Solana gets the full pipeline. The EVM chains get discovery, market
  * health, the scanner and smart money (FOMO's trade feed), but no trade ingestion, wallet
  * scoring or bundle detection.
  */

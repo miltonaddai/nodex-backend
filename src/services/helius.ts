@@ -2,6 +2,10 @@ import { config } from '../config'
 import type { LaunchTransaction } from '../lib/insider-detection'
 import { throttleHelius } from './rate-limit'
 import { cacheGet, cacheSet } from './redis'
+import { ApiKeyPool } from './api-key-pool'
+
+/** Falls back to the next Helius key when one runs out of credits. */
+const heliusKeys = new ApiKeyPool('helius', config.helius.apiKeys)
 
 // --- Credit meter ------------------------------------------------------------------------------
 
@@ -96,14 +100,14 @@ export async function getAddressTransactionsPage(
   for (let attempt = 0; attempt < 3; attempt++) {
     await throttleHelius()
     const params = new URLSearchParams({
-      'api-key': config.helius.apiKey,
       limit: String(Math.min(Math.max(limit, 1), 100)),
       type: 'SWAP',
     })
     if (before) params.set('before', before)
-    const res = await fetch(`${config.helius.baseUrl}/addresses/${address}/transactions?${params}`, {
-      signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
-    })
+    const res = await heliusKeys.fetch((key) => ({
+      url: `${config.helius.baseUrl}/addresses/${address}/transactions?api-key=${key}&${params}`,
+      init: { signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs) },
+    }))
     if (res.ok) {
       charge('enhanced:addressHistory', 100)
       return (await res.json()) as HeliusEnhancedTransaction[]
@@ -450,10 +454,10 @@ async function getSolanaWalletHoldings(address: string): Promise<{ portfolioUsd:
   let tokenCount = 0
   for (let page = 1; page <= 20; page++) {
     await throttleHelius()
-    const res = await fetch(
-      `https://api.helius.xyz/v1/wallet/${address}/balances?api-key=${config.helius.apiKey}&page=${page}&limit=100`,
-      { signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs) }
-    )
+    const res = await heliusKeys.fetch((key) => ({
+      url: `https://api.helius.xyz/v1/wallet/${address}/balances?api-key=${key}&page=${page}&limit=100`,
+      init: { signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs) },
+    }))
     if (!res.ok) return page === 1 ? null : { portfolioUsd, tokenCount }
     charge('wallet:balances', 100)
 
@@ -499,12 +503,15 @@ export async function getWalletLastActiveIso(address: string, chain: string): Pr
 async function heliusRpc<T>(method: string, params: unknown): Promise<T> {
   for (let attempt = 0; attempt < 4; attempt++) {
     await throttleHelius()
-    const res = await fetch(`${config.helius.rpcUrl}/?api-key=${config.helius.apiKey}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-      signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
-    })
+    const res = await heliusKeys.fetch((key) => ({
+      url: `${config.helius.rpcUrl}/?api-key=${key}`,
+      init: {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+        signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
+      },
+    }))
     if (res.status === 429 && attempt < 3) {
       await new Promise((resolve) => setTimeout(resolve, 2_000 * 2 ** attempt))
       continue
@@ -541,12 +548,15 @@ export async function parseTransactions<T = HeliusEnhancedTransaction>(signature
   for (let index = 0; index < signatures.length; index += 100) {
     for (let attempt = 0; attempt < 4; attempt++) {
       await throttleHelius()
-      const res = await fetch(`${config.helius.baseUrl}/transactions?api-key=${config.helius.apiKey}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ transactions: signatures.slice(index, index + 100) }),
-        signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
-      })
+      const res = await heliusKeys.fetch((key) => ({
+        url: `${config.helius.baseUrl}/transactions?api-key=${key}`,
+        init: {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ transactions: signatures.slice(index, index + 100) }),
+          signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
+        },
+      }))
       if (res.status === 429 && attempt < 3) {
         await new Promise((resolve) => setTimeout(resolve, 2_000 * 2 ** attempt))
         continue
@@ -659,14 +669,17 @@ export async function getLastActivityTimes(addresses: string[]): Promise<Map<str
   for (let index = 0; index < addresses.length; index += 20) {
     const batch = addresses.slice(index, index + 20)
     await throttleHelius()
-    const res = await fetch(`${config.helius.rpcUrl}/?api-key=${config.helius.apiKey}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(
-        batch.map((address, id) => ({ jsonrpc: '2.0', id, method: 'getSignaturesForAddress', params: [address, { limit: 1 }] }))
-      ),
-      signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
-    })
+    const res = await heliusKeys.fetch((key) => ({
+      url: `${config.helius.rpcUrl}/?api-key=${key}`,
+      init: {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(
+          batch.map((address, id) => ({ jsonrpc: '2.0', id, method: 'getSignaturesForAddress', params: [address, { limit: 1 }] }))
+        ),
+        signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
+      },
+    }))
     if (!res.ok) throw new Error(`Helius RPC getSignaturesForAddress batch error: ${res.status}`)
     charge('rpc:getSignaturesForAddress', batch.length)
     const body = (await res.json()) as Array<{ id: number; result?: Array<{ blockTime?: number | null }> }>

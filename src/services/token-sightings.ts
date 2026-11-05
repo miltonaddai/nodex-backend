@@ -3,7 +3,7 @@ import { queryClickhouse } from './clickhouse'
 
 /** First-seen and peak fields added to every token row the tables list. */
 export interface SightingFields {
-  /** When NodeX first listed the token, ISO. Null until a pipeline run has recorded it. */
+  /** When WhaleMo first listed the token, ISO. Null until a pipeline run has recorded it. */
   firstSeenAt: string | null
   /** Market cap when first seen. */
   firstSeenMc: number | null

@@ -1,5 +1,6 @@
 import { config } from '../config'
 import { throttleBirdeye } from './rate-limit'
+import { ApiKeyPool } from './api-key-pool'
 import type { PeriodConfig } from '../lib/periods'
 import { PERIOD_CONFIG } from '../lib/periods'
 
@@ -75,19 +76,25 @@ function birdeyeChain(chain: string): string {
   return chain === 'solana' || chain === 'robinhood' || chain === 'bsc' ? chain : 'ethereum'
 }
 
+/** Falls back to the next Birdeye key when one runs out of compute units. */
+const birdeyeKeys = new ApiKeyPool('birdeye', config.birdeye.apiKeys)
+
 async function birdeyeFetch(path: string, chain = 'solana', retries = 1): Promise<unknown | null> {
   if (!config.birdeye.apiKey) return null
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     await throttleBirdeye()
 
-    const res = await fetch(`${config.birdeye.baseUrl}${path}`, {
-      headers: {
-        'X-API-KEY': config.birdeye.apiKey,
-        'x-chain': chain,
+    const res = await birdeyeKeys.fetch((key) => ({
+      url: `${config.birdeye.baseUrl}${path}`,
+      init: {
+        headers: {
+          'X-API-KEY': key,
+          'x-chain': chain,
+        },
+        signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
       },
-      signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
-    })
+    }))
 
     if (res.status === 429 && attempt < retries) {
       const backoffMs = 5000 * 2 ** attempt

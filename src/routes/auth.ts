@@ -102,6 +102,51 @@ router.post('/login', async (req: Request, res: Response) => {
   return res.json({ ...sessionTokens(data.session), user: profile })
 })
 
+/**
+ * Emails a password reset link that lands on the frontend's /reset-password page. Always answers
+ * the same way, so the form can't be used to find out which emails have accounts.
+ */
+router.post('/forgot-password', async (req: Request, res: Response) => {
+  const email = typeof req.body.email === 'string' ? req.body.email.trim() : ''
+  if (!email) return res.status(400).json({ message: 'Email is required' })
+  if (isDemoMode()) return res.status(400).json({ message: 'Demo mode has no passwords to reset' })
+
+  const { error } = await createAuthClient().auth.resetPasswordForEmail(email, {
+    redirectTo: `${config.frontendUrl}/reset-password`,
+  })
+  // Supabase's own rate limit is the one error worth showing; the rest would reveal nothing useful.
+  if (error?.status === 429) {
+    return res.status(429).json({ message: 'Too many reset requests. Wait a minute and try again.' })
+  }
+  if (error) console.warn('[auth] Password reset email failed:', error.message)
+  return res.json({ message: 'If an account exists for that email, a reset link is on its way.' })
+})
+
+/** Sets a new password using the recovery session from the reset email's link. */
+router.post('/reset-password', async (req: Request, res: Response) => {
+  const { accessToken, refreshToken, password } = req.body
+  if (typeof accessToken !== 'string' || typeof refreshToken !== 'string' || !accessToken || !refreshToken) {
+    return res.status(400).json({ message: 'This reset link is invalid. Request a new one.' })
+  }
+  if (typeof password !== 'string' || password.length < 6) {
+    return res.status(400).json({ message: 'Password must be at least 6 characters' })
+  }
+  if (isDemoMode()) return res.status(400).json({ message: 'Demo mode has no passwords to reset' })
+
+  const client = createAuthClient()
+  const { error: sessionError } = await client.auth.setSession({
+    access_token: accessToken,
+    refresh_token: refreshToken,
+  })
+  if (sessionError) {
+    // 400, not 401: the frontend treats a 401 as its own stored session expiring.
+    return res.status(400).json({ message: 'This reset link has expired. Request a new one.' })
+  }
+  const { error } = await client.auth.updateUser({ password })
+  if (error) return res.status(400).json({ message: error.message })
+  return res.json({ message: 'Password updated. Log in with your new password.' })
+})
+
 /** Exchanges a refresh token for a new access token. The refresh token is single-use. */
 router.post('/refresh', async (req: Request, res: Response) => {
   const refreshToken = typeof req.body.refreshToken === 'string' ? req.body.refreshToken : ''
