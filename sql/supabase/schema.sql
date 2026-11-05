@@ -132,10 +132,31 @@ create trigger on_auth_user_created
 -- ---------------------------------------------------------------------------
 -- Row Level Security
 -- ---------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
+-- Saved custom filters (Smart Wallets table)
+-- ---------------------------------------------------------------------------
+
+create table if not exists public.saved_filters (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles (id) on delete cascade,
+  name text not null check (char_length(name) between 1 and 32),
+  -- [{ "field": "marketCap", "op": "lte", "value": 1000000 }, ...]; validated by the backend.
+  rules jsonb not null,
+  -- Alert the user when a token newly matches the filter, on these chains.
+  alert boolean not null default false,
+  alert_chains text[] not null default '{solana,robinhood,bsc}',
+  created_at timestamptz not null default now()
+);
+
+-- One filter per name per user; saving under an existing name replaces it.
+create unique index if not exists saved_filters_user_name_idx
+  on public.saved_filters (user_id, lower(name));
+
 alter table public.profiles enable row level security;
 alter table public.subscriptions enable row level security;
 alter table public.watchlist_wallets enable row level security;
 alter table public.watchlist_tokens enable row level security;
+alter table public.saved_filters enable row level security;
 
 drop policy if exists "Users can view own profile" on public.profiles;
 create policy "Users can view own profile"
@@ -180,6 +201,26 @@ create policy "Users can insert own token watchlist"
 drop policy if exists "Users can delete own token watchlist" on public.watchlist_tokens;
 create policy "Users can delete own token watchlist"
   on public.watchlist_tokens for delete
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can view own saved filters" on public.saved_filters;
+create policy "Users can view own saved filters"
+  on public.saved_filters for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert own saved filters" on public.saved_filters;
+create policy "Users can insert own saved filters"
+  on public.saved_filters for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can delete own saved filters" on public.saved_filters;
+create policy "Users can delete own saved filters"
+  on public.saved_filters for delete
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can update own saved filters" on public.saved_filters;
+create policy "Users can update own saved filters"
+  on public.saved_filters for update
   using (auth.uid() = user_id);
 
 -- Service role (backend) bypasses RLS. Authenticated users read their own rows via policies above.

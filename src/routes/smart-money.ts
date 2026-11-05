@@ -5,6 +5,7 @@ import { PaginatedResult, parsePagination, parseSortOrder, pickSortColumn } from
 import { getSnapshot, snapshotFreshUntil } from '../lib/snapshot-cache'
 import { isEarlySignal } from '../lib/early-signal'
 import { withSightings } from '../services/token-sightings'
+import { matchesRules, parseRules } from '../lib/custom-filters'
 import { pageRows, sortRows, type SortKey } from '../lib/sort-rows'
 import { authMiddleware } from '../middleware/auth'
 import { subscriptionMiddleware } from '../middleware/subscription'
@@ -159,6 +160,8 @@ router.get('/buys', authMiddleware, subscriptionMiddleware, async (req: Request,
   const maxMarketCap = positive(req.query.maxMarketCap)
   const minWalletCount = positive(req.query.minWalletCount)
   const earlyOnly = req.query.preset === 'early'
+  // The user's own filter rules, from the custom filter builder.
+  const rules = parseRules(req.query.rules)
   const empty: BuysResult = {
     items: [],
     page,
@@ -202,7 +205,8 @@ router.get('/buys', authMiddleware, subscriptionMiddleware, async (req: Request,
       (item) =>
         (!earlyOnly || item.earlySignal) &&
         (maxMarketCap === null || (plausibleCap(item) && item.marketCap <= maxMarketCap)) &&
-        (minWalletCount === null || item.walletCount >= minWalletCount)
+        (minWalletCount === null || item.walletCount >= minWalletCount) &&
+        (rules.length === 0 || matchesRules(item, rules))
     )
     // Ties on wallet count go to more profitable buyers, then to larger buys.
     const keys: SortKey<BuyItem>[] = [
