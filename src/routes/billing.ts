@@ -243,7 +243,7 @@ router.post('/portal', authMiddleware, async (req: AuthRequest, res: Response) =
     const stripe = getStripe()
     const session = await stripe.billingPortal.sessions.create({
       customer: subscription.stripe_customer_id,
-      return_url: `${frontendUrl}/billing`,
+      return_url: `${frontendUrl}/settings?tab=subscription`,
     })
 
     res.json({ url: session.url })
