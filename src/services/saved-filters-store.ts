@@ -2,23 +2,15 @@ import { isDemoMode } from './demo-auth'
 import { getSupabaseAdmin } from './supabase'
 import { sanitizeRules, type FilterRule } from '../lib/custom-filters'
 
-/** A user's saved custom filter for the Smart Wallets table, and its alert settings. */
+/** A user's saved custom filter for the Smart Wallets table. Alerts are separate (alerts-store). */
 export interface SavedFilter {
   id: string
   name: string
   rules: FilterRule[]
-  /** Alert when a token newly matches. The browser checks while WhaleMo is open. */
-  alert: boolean
-  alertChains: string[]
 }
 
 export const MAX_SAVED_FILTERS = 20
 export const MAX_FILTER_NAME = 32
-/** Each alert is polled by the browser on every chain it covers, so the number is kept modest. */
-export const MAX_ALERTS = 10
-
-const CHAINS = ['solana', 'robinhood', 'bsc']
-const ALL_CHAINS = [...CHAINS]
 
 /** Demo accounts keep their filters in memory, like the demo watchlists. */
 const demoFilters = new Map<string, SavedFilter[]>()
@@ -27,24 +19,11 @@ interface Row {
   id: string
   name: string
   rules: unknown
-  alert: boolean | null
-  alert_chains: string[] | null
 }
 
-const COLUMNS = 'id, name, rules, alert, alert_chains'
+const COLUMNS = 'id, name, rules'
 
-function cleanChains(value: unknown): string[] {
-  const chains = Array.isArray(value) ? CHAINS.filter((chain) => value.includes(chain)) : []
-  return chains.length ? chains : ALL_CHAINS
-}
-
-const toFilter = (row: Row): SavedFilter => ({
-  id: row.id,
-  name: row.name,
-  rules: sanitizeRules(row.rules),
-  alert: row.alert === true,
-  alertChains: cleanChains(row.alert_chains),
-})
+const toFilter = (row: Row): SavedFilter => ({ id: row.id, name: row.name, rules: sanitizeRules(row.rules) })
 
 export class SavedFilterError extends Error {}
 
@@ -59,23 +38,11 @@ export async function listSavedFilters(userId: string): Promise<SavedFilter[]> {
   return (data ?? []).map((row) => toFilter(row as Row))
 }
 
-function checkAlertLimit(existing: SavedFilter[], exceptId: string | undefined) {
-  const others = existing.filter((filter) => filter.alert && filter.id !== exceptId).length
-  if (others >= MAX_ALERTS) {
-    throw new SavedFilterError(`You can have up to ${MAX_ALERTS} alerts on. Turn one off first.`)
-  }
-}
-
 /**
  * Saves a filter. A filter with the same name (any case) is replaced, so "Save" on an existing
- * name updates it rather than duplicating it. Its alert settings carry over unless given.
+ * name updates it rather than duplicating it.
  */
-export async function saveFilter(
-  userId: string,
-  name: string,
-  rawRules: unknown,
-  options: { alert?: unknown; alertChains?: unknown } = {}
-): Promise<SavedFilter> {
+export async function saveFilter(userId: string, name: string, rawRules: unknown): Promise<SavedFilter> {
   const trimmed = name.trim().slice(0, MAX_FILTER_NAME)
   const rules = sanitizeRules(rawRules)
   if (!trimmed) throw new SavedFilterError('Give the filter a name')
@@ -86,12 +53,9 @@ export async function saveFilter(
   if (!replacing && existing.length >= MAX_SAVED_FILTERS) {
     throw new SavedFilterError(`You can save up to ${MAX_SAVED_FILTERS} filters. Delete one first.`)
   }
-  const alert = typeof options.alert === 'boolean' ? options.alert : (replacing?.alert ?? false)
-  const alertChains = options.alertChains !== undefined ? cleanChains(options.alertChains) : (replacing?.alertChains ?? ALL_CHAINS)
-  if (alert) checkAlertLimit(existing, replacing?.id)
 
   if (isDemoMode()) {
-    const saved: SavedFilter = { id: replacing?.id ?? `demo-${Date.now()}`, name: trimmed, rules, alert, alertChains }
+    const saved: SavedFilter = { id: replacing?.id ?? `demo-${Date.now()}`, name: trimmed, rules }
     demoFilters.set(userId, [...existing.filter((filter) => filter.id !== replacing?.id), saved])
     return saved
   }
@@ -103,37 +67,7 @@ export async function saveFilter(
   }
   const { data, error } = await admin
     .from('saved_filters')
-    .insert({ user_id: userId, name: trimmed, rules, alert, alert_chains: alertChains })
-    .select(COLUMNS)
-    .single()
-  if (error) throw error
-  return toFilter(data as Row)
-}
-
-/** Turns a filter's alert on or off, or changes the chains it watches. */
-export async function updateFilterAlert(
-  userId: string,
-  id: string,
-  changes: { alert?: unknown; alertChains?: unknown }
-): Promise<SavedFilter> {
-  const existing = await listSavedFilters(userId)
-  const current = existing.find((filter) => filter.id === id)
-  if (!current) throw new SavedFilterError('That filter no longer exists')
-  const alert = typeof changes.alert === 'boolean' ? changes.alert : current.alert
-  const alertChains = changes.alertChains !== undefined ? cleanChains(changes.alertChains) : current.alertChains
-  if (alert && !current.alert) checkAlertLimit(existing, id)
-
-  if (isDemoMode()) {
-    const updated = { ...current, alert, alertChains }
-    demoFilters.set(userId, existing.map((filter) => (filter.id === id ? updated : filter)))
-    return updated
-  }
-
-  const { data, error } = await getSupabaseAdmin()
-    .from('saved_filters')
-    .update({ alert, alert_chains: alertChains })
-    .eq('user_id', userId)
-    .eq('id', id)
+    .insert({ user_id: userId, name: trimmed, rules })
     .select(COLUMNS)
     .single()
   if (error) throw error

@@ -1,15 +1,9 @@
 import { Router, Response } from 'express'
 import { authMiddleware, AuthRequest } from '../middleware/auth'
 import { subscriptionMiddleware } from '../middleware/subscription'
-import {
-  deleteSavedFilter,
-  listSavedFilters,
-  saveFilter,
-  SavedFilterError,
-  updateFilterAlert,
-} from '../services/saved-filters-store'
+import { deleteSavedFilter, listSavedFilters, saveFilter, SavedFilterError } from '../services/saved-filters-store'
 
-/** The signed-in user's saved custom filters for the Smart Wallets table. */
+/** The signed-in user's saved custom filters for the Smart Wallets table. Alerts live in routes/alerts. */
 const router = Router()
 
 router.get('/', authMiddleware, subscriptionMiddleware, async (req: AuthRequest, res: Response) => {
@@ -24,28 +18,11 @@ router.get('/', authMiddleware, subscriptionMiddleware, async (req: AuthRequest,
 router.post('/', authMiddleware, subscriptionMiddleware, async (req: AuthRequest, res: Response) => {
   const name = typeof req.body?.name === 'string' ? req.body.name : ''
   try {
-    res.status(201).json(
-      await saveFilter(req.user!.id, name, req.body?.rules, {
-        alert: req.body?.alert,
-        alertChains: req.body?.alertChains,
-      })
-    )
+    res.status(201).json(await saveFilter(req.user!.id, name, req.body?.rules))
   } catch (error) {
     if (error instanceof SavedFilterError) return res.status(400).json({ message: error.message })
     console.error('Failed to save filter:', error)
     res.status(500).json({ message: 'Could not save the filter' })
-  }
-})
-
-/** Alert settings: { alert?: boolean, alertChains?: string[] }. */
-router.patch('/:id', authMiddleware, subscriptionMiddleware, async (req: AuthRequest, res: Response) => {
-  const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
-  try {
-    res.json(await updateFilterAlert(req.user!.id, id, { alert: req.body?.alert, alertChains: req.body?.alertChains }))
-  } catch (error) {
-    if (error instanceof SavedFilterError) return res.status(400).json({ message: error.message })
-    console.error('Failed to update filter alert:', error)
-    res.status(500).json({ message: 'Could not update the alert' })
   }
 })
 

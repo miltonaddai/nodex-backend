@@ -11,6 +11,7 @@ import smartMoneyRoutes from './routes/smart-money'
 import scannerRoutes from './routes/scanner'
 import watchlistRoutes from './routes/watchlist'
 import filterRoutes from './routes/filters'
+import alertRoutes from './routes/alerts'
 import billingRoutes, { billingWebhook } from './routes/billing'
 
 const app = express()
@@ -57,6 +58,7 @@ app.use('/api/smart-money', smartMoneyRoutes)
 app.use('/api/scanner', scannerRoutes)
 app.use('/api/watchlist', watchlistRoutes)
 app.use('/api/filters', filterRoutes)
+app.use('/api/alerts', alertRoutes)
 
 
 app.use((_req, res) => {
