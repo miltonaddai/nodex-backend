@@ -30,6 +30,31 @@ function parsePlan(value: unknown): SubscriptionPlan | null {
 /** One flat plan. Shown until Stripe returns the live price, which replaces it below. */
 const PLAN_PRICE_USD = 25
 
+/** Stripe's "no such object" error, e.g. a customer or subscription saved under an earlier Stripe account. */
+function isMissingInStripe(error: unknown): boolean {
+  return (error as { code?: string } | null)?.code === 'resource_missing'
+}
+
+/**
+ * The user's saved Stripe customer if it still exists in this Stripe account, otherwise a new one.
+ * IDs saved before a switch of Stripe account (or between test and live mode) no longer resolve,
+ * and reusing them made every checkout fail.
+ */
+async function ensureCustomer(stripe: Stripe, userId: string, email: string, savedId: string | null | undefined): Promise<string> {
+  if (savedId) {
+    try {
+      const customer = await stripe.customers.retrieve(savedId)
+      if (!('deleted' in customer && customer.deleted)) return savedId
+    } catch (error) {
+      if (!isMissingInStripe(error)) throw error
+      console.warn(`[billing] Saved Stripe customer ${savedId} not found for user ${userId}; creating a new one`)
+    }
+  }
+  const customer = await stripe.customers.create({ email, metadata: { userId } })
+  await saveStripeCustomerId(userId, customer.id)
+  return customer.id
+}
+
 function formatPaymentMethod(
   paymentMethod: Stripe.PaymentMethod | null | undefined
 ): {
@@ -108,22 +133,29 @@ router.get('/subscription', authMiddleware, async (req: AuthRequest, res: Respon
 
     const stripe = getStripe()
     let currentPeriodEnd = entitled.currentPeriodEnd
+    let paymentMethod: ReturnType<typeof formatPaymentMethod> = null
 
-    if (record.stripe_subscription_id) {
-      const subscription = await stripe.subscriptions.retrieve(record.stripe_subscription_id)
-      currentPeriodEnd = getSubscriptionPeriodEnd(subscription)
+    try {
+      if (record.stripe_subscription_id) {
+        const subscription = await stripe.subscriptions.retrieve(record.stripe_subscription_id)
+        currentPeriodEnd = getSubscriptionPeriodEnd(subscription)
 
-      const price = subscription.items.data[0]?.price
-      if (price?.unit_amount) {
-        base.amount = price.unit_amount / 100
+        const price = subscription.items.data[0]?.price
+        if (price?.unit_amount) {
+          base.amount = price.unit_amount / 100
+        }
       }
-    }
 
-    const paymentMethod = await resolvePaymentMethod(
-      stripe,
-      record.stripe_customer_id,
-      record.stripe_subscription_id
-    )
+      paymentMethod = await resolvePaymentMethod(
+        stripe,
+        record.stripe_customer_id,
+        record.stripe_subscription_id
+      )
+    } catch (error) {
+      // Saved under an earlier Stripe account: show the plan without card or Stripe dates.
+      if (!isMissingInStripe(error)) throw error
+      return res.json(base)
+    }
 
     res.json({
       ...base,
@@ -171,17 +203,21 @@ router.post('/checkout', authMiddleware, async (req: AuthRequest, res: Response)
       return res.status(400).json({ message: 'You are already subscribed to this plan' })
     }
 
-    if (
-      existing?.stripe_subscription_id &&
-      (existing.status === 'active' || existing.status === 'trialing')
-    ) {
-      const subscription = await stripe.subscriptions.retrieve(existing.stripe_subscription_id)
-      const itemId = subscription.items.data[0]?.id
+    // A subscription saved under an earlier Stripe account no longer exists; treat it as none.
+    const current =
+      existing?.stripe_subscription_id && (existing.status === 'active' || existing.status === 'trialing')
+        ? await stripe.subscriptions
+            .retrieve(existing.stripe_subscription_id)
+            .catch((error) => (isMissingInStripe(error) ? null : Promise.reject(error)))
+        : null
+
+    if (current) {
+      const itemId = current.items.data[0]?.id
       if (!itemId) {
         return res.status(500).json({ message: 'Subscription item not found' })
       }
 
-      const updated = await stripe.subscriptions.update(existing.stripe_subscription_id, {
+      const updated = await stripe.subscriptions.update(current.id, {
         items: [{ id: itemId, price: priceIdForPlan(plan) }],
         proration_behavior: 'create_prorations',
         metadata: { userId, plan },
@@ -191,17 +227,7 @@ router.post('/checkout', authMiddleware, async (req: AuthRequest, res: Response)
       return res.json({ updated: true, user: profile })
     }
 
-    let customerId = existing?.stripe_customer_id ?? undefined
-
-    if (!customerId) {
-      const customer = await stripe.customers.create({
-        email,
-        metadata: { userId },
-      })
-      customerId = customer.id
-      await saveStripeCustomerId(userId, customerId)
-    }
-
+    const customerId = await ensureCustomer(stripe, userId, email, existing?.stripe_customer_id)
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       customer: customerId,
@@ -220,7 +246,7 @@ router.post('/checkout', authMiddleware, async (req: AuthRequest, res: Response)
       return res.status(500).json({ message: 'Unable to create checkout session' })
     }
 
-    res.json({ url: session.url })
+    return res.json({ url: session.url })
   } catch (error) {
     console.error('Stripe checkout failed:', error)
     res.status(500).json({ message: 'Failed to start checkout' })
@@ -248,6 +274,9 @@ router.post('/portal', authMiddleware, async (req: AuthRequest, res: Response) =
 
     res.json({ url: session.url })
   } catch (error) {
+    if (isMissingInStripe(error)) {
+      return res.status(400).json({ message: 'No billing account found. Subscribe to a plan first.' })
+    }
     console.error('Stripe portal failed:', error)
     res.status(500).json({ message: 'Failed to open billing portal' })
   }

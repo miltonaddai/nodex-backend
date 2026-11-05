@@ -14,13 +14,12 @@ export function getStripe(): Stripe {
   return stripe
 }
 
+/**
+ * The Pro price is optional: there is one flat plan now, and Pro only identifies subscriptions
+ * started before that. Requiring it switched Stripe off entirely when it was left unset.
+ */
 export function isStripeConfigured(): boolean {
-  return Boolean(
-    config.stripe.secretKey &&
-      config.stripe.webhookSecret &&
-      config.stripe.priceStarter &&
-      config.stripe.pricePro
-  )
+  return Boolean(config.stripe.secretKey && config.stripe.webhookSecret && config.stripe.priceStarter)
 }
 
 export function priceIdForPlan(plan: SubscriptionPlan): string {
@@ -29,7 +28,7 @@ export function priceIdForPlan(plan: SubscriptionPlan): string {
 
 export function planFromPriceId(priceId: string | null | undefined): SubscriptionPlan | null {
   if (!priceId) return null
-  if (priceId === config.stripe.pricePro) return 'pro'
+  if (config.stripe.pricePro && priceId === config.stripe.pricePro) return 'pro'
   if (priceId === config.stripe.priceStarter) return 'starter'
   return null
 }
