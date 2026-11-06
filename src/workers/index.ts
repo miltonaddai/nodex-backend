@@ -10,6 +10,7 @@ import { heliusCreditsUsed } from '../services/helius'
 // import { refreshAllTokenMarketHealth } from './sync-market-health'
 import { syncAllInsiderPlays } from './sync-insiders'
 import { syncAllSmartMoneyBuys } from './sync-smart-money'
+import { deliverTelegramAlerts } from './telegram-alerts'
 import { syncTokenSightings } from './sync-sightings'
 
 let pipelineTimer: NodeJS.Timeout | null = null
@@ -109,6 +110,9 @@ async function runPipeline(): Promise<boolean> {
     // await meteredStep('market-health', () => runHealthRefresh())
     // Feeds the wallets page: tokens the most profitable wallets are net buying right now.
     await meteredStep('smart-money', () => syncAllSmartMoneyBuys())
+    // Right after the fresh snapshot, so Telegram alerts go out within moments of new data.
+    // Isolated: a Telegram problem never fails the run that produced the data.
+    await deliverTelegramAlerts().catch((error) => console.error('[worker] Telegram alerts failed:', error))
     // await meteredStep('top-traders', () => syncAllTopTraders())
     // // Raw trade ingestion feeds wallet_token_trades and wallet_token_performance, which every
     // // downstream step reads.

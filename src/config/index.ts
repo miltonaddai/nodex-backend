@@ -74,6 +74,19 @@ export const config = {
     apiKey: process.env.FOMO_API_KEY || '',
   },
 
+  telegram: {
+    // The bot from @BotFather. Alerts go out from the worker; linking runs through the API.
+    botToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || '',
+    // The bot's username without @, for t.me links (e.g. WhaleMoBot).
+    botUsername: process.env.TELEGRAM_BOT_USERNAME?.trim().replace(/^@/, '') || '',
+    // Any long random string. Telegram sends it with each webhook call, so only Telegram can call it.
+    webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET?.trim() || '',
+    // The API's public address. When set, the API registers its webhook with Telegram on start.
+    apiPublicUrl: process.env.API_PUBLIC_URL?.trim().replace(/\/+$/, '') || '',
+    // Telegram's Bot API. Only changed to point tests at a stand-in server.
+    apiBase: process.env.TELEGRAM_API_BASE?.trim().replace(/\/+$/, '') || 'https://api.telegram.org',
+  },
+
   blockscout: {
     // Keyed Blockscout gateway, used for Robinhood Chain holder counts.
     apiKey: process.env.BLOCKSCOUT_API_KEY || '',

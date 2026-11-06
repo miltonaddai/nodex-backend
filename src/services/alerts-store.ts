@@ -13,6 +13,8 @@ export interface Alert {
   rules: FilterRule[]
   chains: string[]
   enabled: boolean
+  /** Also send to the user's linked Telegram chat. */
+  telegram: boolean
 }
 
 export const MAX_ALERTS = 25
@@ -32,9 +34,12 @@ interface Row {
   rules: unknown
   chains: string[] | null
   enabled: boolean | null
+  telegram?: boolean | null
 }
 
-const COLUMNS = 'id, name, rules, chains, enabled'
+// '*' rather than a column list, so alerts keep working on a database without the telegram
+// column yet (migration 006); it then reads as on.
+const COLUMNS = '*'
 
 function cleanChains(value: unknown): string[] {
   const chains = Array.isArray(value) ? CHAINS.filter((chain) => value.includes(chain)) : []
@@ -47,6 +52,7 @@ const toAlert = (row: Row): Alert => ({
   rules: sanitizeRules(row.rules),
   chains: cleanChains(row.chains),
   enabled: row.enabled !== false,
+  telegram: row.telegram !== false,
 })
 
 export async function listAlerts(userId: string): Promise<Alert[]> {
@@ -68,7 +74,8 @@ function clean(input: Record<string, unknown>, current?: Alert) {
   const enabled = typeof input.enabled === 'boolean' ? input.enabled : (current?.enabled ?? true)
   if (!name) throw new AlertError('Give the alert a name')
   if (rules.length === 0) throw new AlertError('Add at least one condition')
-  return { name, rules, chains, enabled }
+  // telegram is only written when the request sets it, so writes work before migration 006.
+  return { name, rules, chains, enabled, ...(typeof input.telegram === 'boolean' ? { telegram: input.telegram } : {}) }
 }
 
 function checkEnabledLimit(existing: Alert[], exceptId?: string) {
@@ -84,7 +91,7 @@ export async function createAlert(userId: string, input: Record<string, unknown>
   if (fields.enabled) checkEnabledLimit(existing)
 
   if (isDemoMode()) {
-    const alert: Alert = { id: `demo-${Date.now()}`, ...fields }
+    const alert: Alert = { id: `demo-${Date.now()}`, telegram: true, ...fields }
     demoAlerts.set(userId, [...existing, alert])
     return alert
   }

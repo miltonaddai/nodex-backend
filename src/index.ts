@@ -12,6 +12,8 @@ import scannerRoutes from './routes/scanner'
 import watchlistRoutes from './routes/watchlist'
 import filterRoutes from './routes/filters'
 import alertRoutes from './routes/alerts'
+import telegramRoutes from './routes/telegram'
+import { registerWebhook } from './services/telegram'
 import billingRoutes, { billingWebhook } from './routes/billing'
 
 const app = express()
@@ -59,6 +61,7 @@ app.use('/api/scanner', scannerRoutes)
 app.use('/api/watchlist', watchlistRoutes)
 app.use('/api/filters', filterRoutes)
 app.use('/api/alerts', alertRoutes)
+app.use('/api/telegram', telegramRoutes)
 
 
 app.use((_req, res) => {
@@ -67,6 +70,10 @@ app.use((_req, res) => {
 
 app.listen(config.port, () => {
   console.log(`WhaleMo API running on http://localhost:${config.port}`)
+  // Points the Telegram bot at this API's webhook when API_PUBLIC_URL is set. Safe on every start.
+  registerWebhook()
+    .then(() => config.telegram.apiPublicUrl && config.telegram.botToken && console.log('[telegram] Webhook registered'))
+    .catch((error) => console.warn('[telegram] Could not register the webhook:', error instanceof Error ? error.message : error))
 })
 
 export default app
