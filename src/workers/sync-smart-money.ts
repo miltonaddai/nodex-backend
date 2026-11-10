@@ -5,7 +5,7 @@ import { getWalletSwapsSince } from '../services/birdeye'
 import { insertClickhouse, queryClickhouse } from '../services/clickhouse'
 import { getTokenInfo, getTokenMarketHealth } from '../services/dexscreener'
 import { getFomoAlerts } from '../services/fomo'
-import { getLastActivityTime } from '../services/helius'
+import { getLastActivityTimes } from '../services/helius'
 import { cacheDeletePattern } from '../services/redis'
 
 /**
@@ -25,6 +25,11 @@ export const SMART_MONEY_CHAINS = new Set(['solana', 'robinhood', 'bsc'])
  * "anything new?" check to skip idle ones.
  */
 const FEED_CHAINS = new Set(['robinhood', 'bsc'])
+
+/** worker_checkpoints key recording when each wallet's swaps were last fetched. */
+const FETCH_CHECKPOINT = 'smart-money-fetch'
+/** How long a just-made swap may take to appear in Birdeye's history. */
+const INDEXING_MARGIN_SECONDS = 15 * 60
 
 interface TrackedWallet {
   wallet: string
@@ -189,19 +194,37 @@ async function fetchNewSwaps(
     { chain, windowStart }
   )
   const fetchedThrough = new Map(latestRows.map((row) => [row.wallet, Number(row.latest)]))
+  // When each wallet was last fetched, whether or not it had swaps. Without this, a wallet active
+  // on-chain in the window but not swapping (transfers, staking) was fetched again every run.
+  const checkedRows = await queryClickhouse<{ wallet: string; checked: string }>(
+    `SELECT entity_key AS wallet, toUnixTimestamp(max(last_block_time)) AS checked
+     FROM worker_checkpoints FINAL
+     WHERE worker = {worker:String} AND chain = {chain:String}
+     GROUP BY entity_key`,
+    { worker: FETCH_CHECKPOINT, chain }
+  ).catch(() => [])
+  const checkedAt = new Map(checkedRows.map((row) => [row.wallet, Number(row.checked)]))
+  const checkedNow: Record<string, unknown>[] = []
   const fetchedAt = formatDate(Math.floor(Date.now() / 1000))
   const rows: Record<string, unknown>[] = []
   let fetched = 0
   let skipped = 0
+  // Last on-chain activity for every wallet up front, 20 per Helius request. A wallet missing
+  // from the map (lookup failed) is simply fetched.
+  const lastActivity =
+    chain === 'solana' ? await getLastActivityTimes(wallets.map((w) => w.wallet)).catch(() => new Map<string, number>()) : new Map<string, number>()
 
   for (const { wallet } of wallets) {
     const latest = fetchedThrough.get(wallet)
     try {
-      // Only Solana has a cheap "anything new?" check. On Robinhood Chain the equivalent Alchemy
-      // call costs more than the Birdeye fetch it would save.
-      if (latest !== undefined && chain === 'solana') {
-        const lastActivity = await getLastActivityTime(wallet)
-        if (lastActivity !== null && lastActivity <= latest) {
+      // Only Solana has a cheap "anything new?" check (1 Helius credit against 15 Birdeye CU per
+      // page). On Robinhood Chain the equivalent Alchemy call costs more than the fetch it saves.
+      // Quiet wallets, with nothing stored in the window, are checked against the window start:
+      // they are most of the list, and fetching them anyway spent Birdeye CU on empty results.
+      if (chain === 'solana') {
+        const active = lastActivity.get(wallet)
+        const seenThrough = Math.max(latest ?? 0, checkedAt.get(wallet) ?? 0, windowStart)
+        if (active !== undefined && active <= seenThrough) {
           skipped++
           continue
         }
@@ -211,6 +234,16 @@ async function fetchNewSwaps(
       const since = latest !== undefined ? Math.max(windowStart, latest - 60) : windowStart
       const swaps = await getWalletSwapsSince(wallet, since, config.worker.smartMoneyMaxSwapPages, chain)
       fetched++
+      // Recorded as checked up to a little before now: a swap made just before this fetch may not
+      // be indexed by Birdeye yet, so activity in that margin is fetched again next run.
+      checkedNow.push({
+        worker: FETCH_CHECKPOINT,
+        chain,
+        entity_key: wallet,
+        cursor: '',
+        last_block_time: formatDate(Math.floor(Date.now() / 1000) - INDEXING_MARGIN_SECONDS),
+        updated_at: fetchedAt,
+      })
       for (const swap of swaps) {
         rows.push({
           chain,
@@ -237,6 +270,8 @@ async function fetchNewSwaps(
   for (let index = 0; index < rows.length; index += 10_000) {
     await insertClickhouse('smart_money_swaps', rows.slice(index, index + 10_000))
   }
+  // Only after the swaps are stored, so a failed insert never marks a wallet as checked.
+  if (checkedNow.length > 0) await insertClickhouse('worker_checkpoints', checkedNow).catch(() => {})
   return { fetched, skipped, stored: rows.length }
 }
 

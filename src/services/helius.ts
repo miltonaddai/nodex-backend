@@ -666,21 +666,29 @@ export async function getLastActivityTime(address: string): Promise<number | nul
  */
 export async function getLastActivityTimes(addresses: string[]): Promise<Map<string, number>> {
   const result = new Map<string, number>()
-  for (let index = 0; index < addresses.length; index += 20) {
-    const batch = addresses.slice(index, index + 20)
-    await throttleHelius()
-    const res = await heliusKeys.fetch((key) => ({
-      url: `${config.helius.rpcUrl}/?api-key=${key}`,
-      init: {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(
-          batch.map((address, id) => ({ jsonrpc: '2.0', id, method: 'getSignaturesForAddress', params: [address, { limit: 1 }] }))
-        ),
-        signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
-      },
-    }))
-    if (!res.ok) throw new Error(`Helius RPC getSignaturesForAddress batch error: ${res.status}`)
+  // Each wallet in a batch counts against the rate limit, so batches are kept small, and a rate
+  // limited batch is retried with backoff rather than failing the whole lookup.
+  const BATCH = 10
+  for (let index = 0; index < addresses.length; index += BATCH) {
+    const batch = addresses.slice(index, index + BATCH)
+    let res: Response | null = null
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await throttleHelius()
+      res = await heliusKeys.fetch((key) => ({
+        url: `${config.helius.rpcUrl}/?api-key=${key}`,
+        init: {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(
+            batch.map((address, id) => ({ jsonrpc: '2.0', id, method: 'getSignaturesForAddress', params: [address, { limit: 1 }] }))
+          ),
+          signal: AbortSignal.timeout(config.worker.providerRequestTimeoutMs),
+        },
+      }))
+      if (res.status !== 429) break
+      await new Promise((resolve) => setTimeout(resolve, 1_500 * 2 ** attempt))
+    }
+    if (!res || !res.ok) throw new Error(`Helius RPC getSignaturesForAddress batch error: ${res?.status}`)
     charge('rpc:getSignaturesForAddress', batch.length)
     const body = (await res.json()) as Array<{ id: number; result?: Array<{ blockTime?: number | null }> }>
     for (const entry of Array.isArray(body) ? body : []) {

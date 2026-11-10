@@ -14,7 +14,7 @@ import {
   type SubscriptionPlan,
 } from '../services/users'
 import { authMiddleware, AuthRequest } from '../middleware/auth'
-import { config } from '../config'
+import { config, resolveFrontendUrl } from '../config'
 
 const router = Router()
 
@@ -112,7 +112,8 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
   if (isDemoMode()) return res.status(400).json({ message: 'Demo mode has no passwords to reset' })
 
   const { error } = await createAuthClient().auth.resetPasswordForEmail(email, {
-    redirectTo: `${config.frontendUrl}/reset-password`,
+    // The site the request came from (when it's an allowed origin), else FRONTEND_URL.
+    redirectTo: `${resolveFrontendUrl(req)}/reset-password`,
   })
   // Supabase's own rate limit is the one error worth showing; the rest would reveal nothing useful.
   if (error?.status === 429) {
